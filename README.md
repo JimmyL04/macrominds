@@ -1,1 +1,11 @@
-# repo-template
+
+  # Interactive Economic Dashboard
+
+  This is a code bundle for Interactive Economic Dashboard. The original project is available at https://www.figma.com/design/eKHQGEPTPPhO1vJJKNleOQ/Interactive-Economic-Dashboard.
+
+  ## Running the code
+
+  Run `npm i` to install the dependencies.
+
+  Run `npm run dev` to start the development server.
+  
