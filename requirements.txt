@@ -1,0 +1,15 @@
+flask==3.1.0
+pandas==2.2.3
+numpy==1.26.4
+scikit-learn==1.6.1
+xgboost==2.1.4
+statsmodels==0.14.4
+matplotlib==3.9.4
+plotly==5.24.1
+seaborn==0.13.2
+fredapi==0.5.2
+sqlalchemy==2.0.36
+psycopg2-binary==2.9.10
+python-dotenv==1.0.1
+joblib==1.4.2
+requests==2.32.3

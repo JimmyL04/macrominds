@@ -1,0 +1,31 @@
+# Environment & secrets
+.env
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+
+# ML model files (too large for GitHub)
+*.pkl
+*.joblib
+*.h5
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Jupyter/Colab
+.ipynb_checkpoints/
+
+# Database
+*.db
+*.sqlite3
