@@ -1,0 +1,356 @@
+"""
+backend/data/ingestion.py
+
+Fetches economic data from FRED, BLS, and World Bank APIs,
+applies the same feature engineering used in MacroMinds.ipynb,
+and upserts results into the economic_data PostgreSQL table.
+
+Usage:
+    python -m backend.data.ingestion          # from project root
+    python backend/data/ingestion.py          # direct
+"""
+
+import os
+import json
+import logging
+import sys
+import requests
+import numpy as np
+import pandas as pd
+from dotenv import load_dotenv
+from fredapi import Fred
+
+# Allow running as a standalone script from any working directory
+_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+if _root not in sys.path:
+    sys.path.insert(0, _root)
+
+from backend.db.db_utils import get_engine  # noqa: E402
+
+load_dotenv()
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s  %(levelname)-8s  %(message)s',
+    datefmt='%H:%M:%S',
+)
+log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# 1. FRED
+# ---------------------------------------------------------------------------
+
+def fetch_fred_data() -> pd.DataFrame:
+    """
+    Fetch UNRATE, CPIAUCSL, ICSA, W875RX1 from FRED.
+    Resamples everything to Monthly Start (MS) — weekly ICSA is mean-aggregated.
+    Returns a DataFrame indexed by month-start dates.
+    """
+    api_key = os.getenv('FRED_API_KEY')
+    if not api_key:
+        raise ValueError("FRED_API_KEY not found in environment / .env")
+
+    fred = Fred(api_key=api_key)
+
+    series_map = {
+        'Unemployment':    'UNRATE',
+        'Inflation':       'CPIAUCSL',
+        'Weekly_Claims':   'ICSA',
+        'Personal_Income': 'W875RX1',
+    }
+
+    raw = {}
+    for name, series_id in series_map.items():
+        log.info(f"  FRED  {series_id:12s}  ({name})")
+        raw[name] = fred.get_series(series_id)
+
+    df = pd.DataFrame(raw)
+    df_monthly = df.resample('MS').mean().ffill().dropna()
+    log.info(
+        f"FRED data ready: {len(df_monthly)} rows  "
+        f"[{df_monthly.index[0].date()} → {df_monthly.index[-1].date()}]"
+    )
+    return df_monthly
+
+
+# ---------------------------------------------------------------------------
+# 2. BLS
+# ---------------------------------------------------------------------------
+
+def fetch_bls_data() -> pd.DataFrame:
+    """
+    Fetch CPI-U All-Items (CUUR0000SA0) from the BLS public API v2.
+    Computes Year-over-Year inflation rate.
+    Returns a DataFrame indexed by month-start dates, or an empty DataFrame on failure.
+    """
+    api_key = os.getenv('BLS_API_KEY')
+
+    payload: dict = {
+        "seriesid": ["CUUR0000SA0"],
+        "startyear": "2000",
+        "endyear": "2025",
+    }
+    if api_key:
+        payload["registrationkey"] = api_key
+
+    headers = {"Content-type": "application/json"}
+
+    log.info("  BLS   CUUR0000SA0  (CPI-U All Items)")
+    try:
+        resp = requests.post(
+            "https://api.bls.gov/publicAPI/v2/timeseries/data/",
+            data=json.dumps(payload),
+            headers=headers,
+            timeout=30,
+        )
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        log.warning(f"BLS request failed: {exc} — skipping BLS data")
+        return pd.DataFrame()
+
+    json_data = resp.json()
+
+    if json_data.get("status") == "REQUEST_FAILED":
+        log.warning(f"BLS API error: {json_data.get('message')} — skipping BLS data")
+        return pd.DataFrame()
+
+    rows = []
+    for series in json_data.get("Results", {}).get("series", []):
+        for item in series["data"]:
+            raw_val = item["value"].strip()
+            if raw_val in ("-", ""):
+                continue
+            rows.append({
+                "Year":    int(item["year"]),
+                "Month":   item["periodName"],
+                "BLS_CPI": float(raw_val),
+            })
+
+    if not rows:
+        log.warning("BLS returned no usable rows — skipping")
+        return pd.DataFrame()
+
+    bls_df = pd.DataFrame(rows)
+    bls_df["Date"] = pd.to_datetime(
+        bls_df["Month"] + " " + bls_df["Year"].astype(str)
+    )
+    bls_df.set_index("Date", inplace=True)
+    bls_df.sort_index(inplace=True)
+    bls_df.drop(columns=["Year", "Month"], inplace=True)
+
+    bls_df["BLS_Inflation_Rate"] = bls_df["BLS_CPI"].pct_change(periods=12) * 100
+    bls_df.dropna(subset=["BLS_CPI"], inplace=True)
+
+    log.info(
+        f"BLS data ready: {len(bls_df)} rows  "
+        f"[{bls_df.index[0].date()} → {bls_df.index[-1].date()}]"
+    )
+    return bls_df
+
+
+# ---------------------------------------------------------------------------
+# 3. World Bank
+# ---------------------------------------------------------------------------
+
+def fetch_worldbank_data() -> pd.DataFrame:
+    """
+    Fetch US GDP growth (annual) and Poverty Rate from the World Bank API.
+    Forward-fills annual values to monthly frequency.
+    Returns a DataFrame indexed by month-start dates, or an empty DataFrame on failure.
+    """
+    indicators = {
+        "GDP_Growth":   "NY.GDP.MKTP.KD.ZG",
+        "Poverty_Rate": "SI.POV.NAHC",
+    }
+
+    wb_rows: list[dict] = []
+    for name, code in indicators.items():
+        url = (
+            f"https://api.worldbank.org/v2/country/US/indicator/{code}"
+            f"?format=json&date=2000:2025&per_page=100"
+        )
+        log.info(f"  WB    {code}  ({name})")
+        try:
+            resp = requests.get(url, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+            if len(data) == 2 and data[1]:
+                for item in data[1]:
+                    if item["value"] is not None:
+                        wb_rows.append({"Year": int(item["date"]), name: float(item["value"])})
+        except Exception as exc:
+            log.warning(f"World Bank {code} failed: {exc}")
+
+    if not wb_rows:
+        log.warning("World Bank returned no data — skipping")
+        return pd.DataFrame()
+
+    wb_df = (
+        pd.DataFrame(wb_rows)
+        .groupby("Year")
+        .first()
+        .reset_index()
+    )
+    wb_df["Date"] = pd.to_datetime(wb_df["Year"].astype(str) + "-01-01")
+    wb_df.set_index("Date", inplace=True)
+    wb_df.sort_index(inplace=True)
+    wb_df.drop(columns=["Year"], inplace=True)
+
+    # Forward-fill annual observations to monthly
+    wb_monthly = wb_df.resample("MS").ffill()
+    log.info(
+        f"World Bank data ready: {len(wb_monthly)} rows  "
+        f"[{wb_monthly.index[0].date()} → {wb_monthly.index[-1].date()}]"
+    )
+    return wb_monthly
+
+
+# ---------------------------------------------------------------------------
+# 4. Feature engineering  (mirrors MacroMinds.ipynb Cells 3, 7, 9)
+# ---------------------------------------------------------------------------
+
+def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Applies the same transformations from the Colab notebook:
+
+    1. Resampling is already done in fetch_fred_data (MS, mean + ffill).
+    2. YoY Inflation Rate  : CPI pct_change(12) * 100
+    3. YoY Income Growth   : Personal_Income pct_change(12) * 100
+    4. Lag features        : Claims_Lag1, Inflation_Lag1, Income_Lag1, Unemployment_Lag1
+    5. Z-score normalisation: Unemployment, Weekly_Claims, Income_Growth
+    """
+    df = df.copy()
+
+    # --- YoY growth rates ---
+    df["Inflation_Rate"] = df["Inflation"].pct_change(12) * 100
+    df["Income_Growth"]  = df["Personal_Income"].pct_change(12) * 100
+
+    # --- Lag features (t-1) ---
+    df["Claims_Lag1"]       = df["Weekly_Claims"].shift(1)
+    df["Inflation_Lag1"]    = df["Inflation_Rate"].shift(1)
+    df["Income_Lag1"]       = df["Income_Growth"].shift(1)
+    df["Unemployment_Lag1"] = df["Unemployment"].shift(1)
+
+    # Drop rows whose YoY rates are still NaN (first 12 months)
+    df.dropna(subset=["Inflation_Rate", "Income_Growth"], inplace=True)
+
+    # --- Z-score normalisation (full-history mean/std) ---
+    for col in ["Unemployment", "Weekly_Claims", "Income_Growth"]:
+        df[f"{col}_Z"] = (df[col] - df[col].mean()) / df[col].std()
+
+    log.info(
+        f"Feature engineering complete: {len(df)} rows, "
+        f"{len(df.columns)} columns"
+    )
+    return df
+
+
+# ---------------------------------------------------------------------------
+# 5. Write to PostgreSQL  (upsert on unique(date, source))
+# ---------------------------------------------------------------------------
+
+# Maps economic_data column names → DataFrame column names
+_DB_COL_MAP = {
+    "unemployment":    "Unemployment",
+    "inflation_cpi":   "Inflation",
+    "inflation_rate":  "Inflation_Rate",
+    "weekly_claims":   "Weekly_Claims",
+    "personal_income": "Personal_Income",
+    "income_growth":   "Income_Growth",
+    "gdp_growth":      "GDP_Growth",
+}
+
+
+def _to_float_or_none(val) -> float | None:
+    try:
+        f = float(val)
+        return None if np.isnan(f) else f
+    except (TypeError, ValueError):
+        return None
+
+
+def write_to_db(df: pd.DataFrame, source: str = "FRED") -> int:
+    """
+    Upserts the processed DataFrame into the economic_data table.
+    ON CONFLICT (date, source) → updates all non-key columns.
+    Returns the number of rows upserted.
+    """
+    from sqlalchemy import MetaData
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    rows = []
+    for ts, row in df.iterrows():
+        record: dict = {"date": ts.date(), "source": source}
+        for db_col, df_col in _DB_COL_MAP.items():
+            record[db_col] = _to_float_or_none(row.get(df_col))
+        rows.append(record)
+
+    if not rows:
+        log.warning("No rows to write — aborting")
+        return 0
+
+    engine = get_engine()
+    with engine.begin() as conn:
+        meta = MetaData()
+        meta.reflect(bind=engine, only=["economic_data"])
+        table = meta.tables["economic_data"]
+
+        stmt = pg_insert(table).values(rows)
+        update_cols = {
+            c.name: stmt.excluded[c.name]
+            for c in table.c
+            if c.name not in ("id", "date", "source", "created_at")
+        }
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["date", "source"],
+            set_=update_cols,
+        )
+        conn.execute(stmt)
+
+    log.info(f"Upserted {len(rows)} rows  (source='{source}')")
+    return len(rows)
+
+
+# ---------------------------------------------------------------------------
+# 6. Orchestration
+# ---------------------------------------------------------------------------
+
+def run_ingestion() -> pd.DataFrame:
+    log.info("========== MacroMinds Data Ingestion ==========")
+
+    # --- Fetch ---
+    log.info("--- Fetching FRED data ---")
+    df_fred = fetch_fred_data()
+
+    log.info("--- Fetching BLS data ---")
+    df_bls = fetch_bls_data()
+
+    log.info("--- Fetching World Bank data ---")
+    df_wb = fetch_worldbank_data()
+
+    # --- Feature engineering on FRED base ---
+    log.info("--- Engineering features ---")
+    df = engineer_features(df_fred)
+
+    # --- Merge supplementary sources ---
+    if not df_bls.empty:
+        df = df.join(df_bls, how="left")
+        log.info("Merged BLS data")
+
+    if not df_wb.empty:
+        df = df.join(df_wb[["GDP_Growth"]], how="left")
+        df["GDP_Growth"] = df["GDP_Growth"].ffill()
+        log.info("Merged World Bank GDP data")
+
+    log.info(f"Final dataset: {len(df)} rows × {len(df.columns)} columns")
+
+    # --- Write ---
+    log.info("--- Writing to PostgreSQL ---")
+    n = write_to_db(df)
+
+    log.info(f"========== Ingestion complete: {n} rows written ==========")
+    return df
+
+
+if __name__ == "__main__":
+    run_ingestion()
