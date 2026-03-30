@@ -5,18 +5,11 @@ Flask Blueprint exposing the MacroMinds prediction API.
 
 Routes
 ------
-GET /api/predictions
-    Returns the latest unemployment and inflation nowcasts using
-    get_latest_features() and both model predict() functions.
-
-GET /api/historical
-    Returns historical economic data from the database.
-    Optional query params: start_date, end_date  (YYYY-MM-DD)
-
-GET /api/simulate
-    What-if scenario prediction.
-    Required query params: claims, inflation, income, prev_unemployment
-    Returns unemployment and inflation predictions for the given inputs.
+GET /api/predictions   — latest unemployment + inflation nowcast
+GET /api/historical    — historical DB rows (optional start_date / end_date)
+GET /api/simulate      — what-if scenario prediction
+GET /api/backtest      — model accuracy over historical data (optional start_date)
+GET /api/forecast      — rolling multi-month forward nowcast (optional months, default 6)
 """
 
 import os
@@ -268,3 +261,165 @@ def simulate():
         "unemployment_prediction": round(unemp_pred, 4),
         "inflation_prediction":    round(inf_pred, 4),
     })
+
+
+# ---------------------------------------------------------------------------
+# GET /api/backtest
+# ---------------------------------------------------------------------------
+
+@api_bp.route('/backtest', methods=['GET'])
+def backtest():
+    """
+    Runs both models over historical feature rows and returns actual vs.
+    predicted values so the UI can visualise model accuracy over time.
+
+    Query params (optional)
+    -----------------------
+    start_date : YYYY-MM-DD — only return rows from this date onwards
+
+    Response
+    --------
+    {
+        "count": int,
+        "data": [
+            {
+                "date": "YYYY-MM-DD",
+                "actual_unemployment": float | null,
+                "predicted_unemployment": float | null,
+                "actual_inflation": float | null,
+                "predicted_inflation": float | null
+            },
+            ...
+        ]
+    }
+    """
+    start_date = request.args.get('start_date')
+
+    try:
+        df = build_features()
+    except Exception as exc:
+        log.exception("build_features failed in backtest")
+        return _err(f"Feature dataset error: {exc}", 500)
+
+    if start_date:
+        df = df.loc[start_date:]
+
+    results = []
+    for ts, row in df.iterrows():
+        features_dict = {feat: float(row[feat]) for feat in MODEL_FEATURES}
+
+        try:
+            unemp_pred = predict_unemployment(features_dict)
+        except FileNotFoundError as exc:
+            return _err(str(exc), 503)
+        except Exception:
+            unemp_pred = None
+
+        try:
+            inf_pred = predict_inflation(features_dict)
+        except FileNotFoundError as exc:
+            return _err(str(exc), 503)
+        except Exception:
+            inf_pred = None
+
+        import math
+        def _safe(v):
+            if v is None:
+                return None
+            try:
+                return None if math.isnan(float(v)) else round(float(v), 4)
+            except (TypeError, ValueError):
+                return None
+
+        results.append({
+            "date":                   ts.date().isoformat(),
+            "actual_unemployment":    _safe(row.get("Unemployment")),
+            "predicted_unemployment": _safe(unemp_pred),
+            "actual_inflation":       _safe(row.get("Inflation_Rate")),
+            "predicted_inflation":    _safe(inf_pred),
+        })
+
+    return jsonify({"count": len(results), "data": results})
+
+
+# ---------------------------------------------------------------------------
+# GET /api/forecast
+# ---------------------------------------------------------------------------
+
+@api_bp.route('/forecast', methods=['GET'])
+def forecast():
+    """
+    Rolling multi-month forward nowcast.
+
+    Each step feeds the previous step's predicted unemployment and inflation
+    back as Unemployment_Lag1 / Inflation_Lag1 for the next step.
+    Claims_Z_Lag1 and Income_Z_Lag1 are held constant at their latest
+    observed values (no future macro data is available for those series).
+
+    Query params (optional)
+    -----------------------
+    months : int  — number of months to forecast (default 6, max 24)
+
+    Response
+    --------
+    {
+        "count": int,
+        "data": [
+            { "date": "Apr 2026", "predicted_unemployment": float, "predicted_inflation": float },
+            ...
+        ]
+    }
+    """
+    try:
+        months = int(request.args.get('months', 6))
+    except ValueError:
+        return _err("months must be an integer")
+
+    if not (1 <= months <= 24):
+        return _err("months must be between 1 and 24")
+
+    try:
+        import pandas as pd
+        latest_features = get_latest_features()
+        df = build_features()
+        last_date = df.index[-1]
+    except Exception as exc:
+        log.exception("Failed to load latest features for forecast")
+        return _err(f"Feature loading failed: {exc}", 500)
+
+    MONTH_NAMES = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ]
+
+    try:
+        current_features = dict(latest_features)
+        results = []
+
+        for i in range(months):
+            # Predict with the current feature state
+            unemp_pred = predict_unemployment(current_features)
+            inf_pred   = predict_inflation(current_features)
+
+            # Advance date by (i+1) months from the last historical date
+            forecast_ts = last_date + pd.DateOffset(months=i + 1)
+            date_str    = f"{MONTH_NAMES[forecast_ts.month - 1]} {forecast_ts.year}"
+
+            results.append({
+                "date":                   date_str,
+                "predicted_unemployment": round(unemp_pred, 4),
+                "predicted_inflation":    round(inf_pred, 4),
+            })
+
+            # Rolling update: feed predictions back as the next step's lags
+            current_features['Unemployment_Lag1'] = unemp_pred
+            current_features['Inflation_Lag1']    = inf_pred
+            # Claims_Z_Lag1 and Income_Z_Lag1 stay constant
+
+    except FileNotFoundError as exc:
+        return _err(str(exc), 503)
+    except Exception as exc:
+        log.exception("Forecast loop failed")
+        return _err(f"Forecast failed: {exc}", 500)
+
+    return jsonify({"count": len(results), "data": results})

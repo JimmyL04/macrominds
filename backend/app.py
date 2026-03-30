@@ -17,6 +17,7 @@ import sys
 import logging
 
 from flask import Flask
+from flask_cors import CORS
 
 _root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if _root not in sys.path:
@@ -34,6 +35,9 @@ log = logging.getLogger(__name__)
 
 def create_app() -> Flask:
     app = Flask(__name__)
+
+    # Allow the Vite dev server (default port 5173) to call the API
+    CORS(app, origins=["http://localhost:5173", "http://127.0.0.1:5173"])
 
     # Register blueprints
     app.register_blueprint(api_bp)
@@ -55,6 +59,6 @@ if __name__ == '__main__':
     app = create_app()
     app.run(
         host=os.getenv('FLASK_HOST', '0.0.0.0'),
-        port=int(os.getenv('FLASK_PORT', 5000)),
+        port=int(os.getenv('FLASK_PORT', 5001)),
         debug=os.getenv('FLASK_DEBUG', 'true').lower() == 'true',
     )
