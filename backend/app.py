@@ -5,7 +5,7 @@ import re
 import sys
 import logging
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 
 _root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if _root not in sys.path:
@@ -84,6 +84,9 @@ def is_allowed_origin(origin: str) -> bool:
     return any(re.match(pattern, origin) for pattern in _ALLOWED_ORIGINS)
 
 
+_frontend_dist = os.path.join(os.path.dirname(__file__), '..', 'frontend', 'dist')
+
+
 def create_app() -> Flask:
     app = Flask(__name__)
 
@@ -133,6 +136,13 @@ def create_app() -> Flask:
             log.exception("Initialization failed")
             return jsonify({"status": "error", "message": str(exc)}), 500
 
+    @app.route('/', defaults={'path': ''})
+    @app.route('/<path:path>')
+    def serve_frontend(path):
+        if path and os.path.exists(os.path.join(_frontend_dist, path)):
+            return send_from_directory(_frontend_dist, path)
+        return send_from_directory(_frontend_dist, 'index.html')
+
     log.info("Registered routes:")
     with app.app_context():
         for rule in sorted(app.url_map.iter_rules(), key=lambda r: r.rule):
@@ -145,6 +155,6 @@ if __name__ == '__main__':
     app = create_app()
     app.run(
         host='0.0.0.0',
-        port=int(os.environ.get('PORT', os.getenv('FLASK_PORT', 5001))),
+        port=int(os.environ.get('PORT', 5001)),
         debug=os.getenv('FLASK_DEBUG', 'false').lower() == 'true',
     )
