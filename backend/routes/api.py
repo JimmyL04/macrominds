@@ -291,6 +291,7 @@ def forecast():
         import contextlib
         import pandas as pd
         from prophet import Prophet
+        logging.getLogger("cmdstanpy").setLevel(logging.ERROR)
 
         df = build_features()
 

@@ -14,5 +14,5 @@ python-dotenv==1.0.1
 joblib==1.4.2
 requests==2.32.3
 flask-cors==5.0.0
-pystan==3.4.0
-prophet==1.1.5
+cmdstanpy>=1.1.0
+prophet==1.1.6
