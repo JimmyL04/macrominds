@@ -40,6 +40,13 @@ CREATE TABLE IF NOT EXISTS model_registry (
     trained_at TIMESTAMP DEFAULT NOW()
 );
 
+-- Stores serialized ML models as binary so they survive container redeployments
+CREATE TABLE IF NOT EXISTS model_storage (
+    name VARCHAR(100) PRIMARY KEY,
+    model_data BYTEA NOT NULL,
+    trained_at TIMESTAMP DEFAULT NOW()
+);
+
 -- Index for fast date lookups
 CREATE INDEX IF NOT EXISTS idx_economic_data_date ON economic_data(date);
 CREATE INDEX IF NOT EXISTS idx_predictions_date ON predictions(date);

@@ -42,11 +42,10 @@ def initialize_if_empty() -> dict:
     with engine.connect() as conn:
         count = conn.execute(text("SELECT COUNT(*) FROM economic_data")).scalar()
 
-    from backend.models.unemployment_model import MODEL_PATH as UNEMP_PKL
-    from backend.models.inflation_model import MODEL_PATH as INF_PKL
+    from backend.db.model_storage import model_exists
 
     if count and count > 0:
-        models_exist = os.path.exists(UNEMP_PKL) and os.path.exists(INF_PKL)
+        models_exist = model_exists('unemployment_xgb') and model_exists('inflation_xgb')
         if models_exist:
             log.info(f"Database has {count} rows and models exist — skipping initialization")
             return {"status": "skipped", "rows": count}

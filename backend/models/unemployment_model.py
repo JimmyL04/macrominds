@@ -5,7 +5,6 @@ import sys
 import logging
 import warnings
 
-import joblib
 import numpy as np
 import pandas as pd
 import xgboost as xgb
@@ -17,6 +16,7 @@ if _root not in sys.path:
     sys.path.insert(0, _root)
 
 from backend.data.preprocessing import get_training_data, MODEL_FEATURES  # noqa: E402
+from backend.db.model_storage import save_model, load_model, model_exists  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,7 +28,7 @@ warnings.filterwarnings('ignore')   # suppress ARIMA convergence noise
 
 TRAIN_CUTOFF = '2022-01-01'
 TEST_END     = '2025-12-31'
-MODEL_PATH   = os.path.join(os.path.dirname(__file__), 'unemployment_xgb.pkl')
+MODEL_NAME   = 'unemployment_xgb'
 
 
 def _train_xgboost(
@@ -91,34 +91,25 @@ def train() -> xgb.XGBRegressor:
     log.info(f"Training ARIMA(2,1,2) on {len(y_train)} rows...")
     _, _, arima_rmse, arima_r2 = _train_arima(y_train, y_test)
 
-    print("\n--- Unemployment Model Results ---")
-    print(f"{'Model':<22} {'RMSE':>8} {'R²':>8}")
-    print("-" * 42)
-    print(f"{'XGBoost (champion)':<22} {xgb_rmse:>8.4f} {xgb_r2:>8.4f}")
+    log.info(f"XGBoost  RMSE={xgb_rmse:.4f}  R²={xgb_r2:.4f}")
     if not np.isnan(arima_rmse):
-        print(f"{'ARIMA(2,1,2)':<22} {arima_rmse:>8.4f} {arima_r2:>8.4f}")
+        log.info(f"ARIMA    RMSE={arima_rmse:.4f}  R²={arima_r2:.4f}")
     else:
-        print(f"{'ARIMA(2,1,2)':<22} {'failed':>8} {'—':>8}")
+        log.info("ARIMA    failed")
 
-    winner = (
-        "XGBoost" if np.isnan(arima_rmse) or xgb_rmse <= arima_rmse else "ARIMA"
-    )
-    print(f"\nBest model: {winner}")
-    print()
-
-    # always save xgboost — ARIMA can't do feature-based inference at prediction time
-    joblib.dump(xgb_model, MODEL_PATH)
-    log.info(f"XGBoost saved → {MODEL_PATH}")
+    # always save XGBoost — ARIMA can't do feature-based inference at prediction time
+    save_model(MODEL_NAME, xgb_model)
+    log.info(f"XGBoost saved to database as '{MODEL_NAME}'")
 
     return xgb_model
 
 
 def predict(features_dict: dict) -> float:
-    if not os.path.exists(MODEL_PATH):
-        log.info("unemployment_xgb.pkl not found — training now...")
+    if not model_exists(MODEL_NAME):
+        log.info(f"'{MODEL_NAME}' not found in database — training now...")
         train()
 
-    model = joblib.load(MODEL_PATH)
+    model = load_model(MODEL_NAME)
     X = pd.DataFrame([features_dict])[MODEL_FEATURES]
     return float(model.predict(X)[0])
 

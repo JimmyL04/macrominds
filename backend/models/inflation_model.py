@@ -4,7 +4,6 @@ import os
 import sys
 import logging
 
-import joblib
 import numpy as np
 import pandas as pd
 import xgboost as xgb
@@ -15,6 +14,7 @@ if _root not in sys.path:
     sys.path.insert(0, _root)
 
 from backend.data.preprocessing import build_features, MODEL_FEATURES  # noqa: E402
+from backend.db.model_storage import save_model, load_model, model_exists  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,7 +26,7 @@ log = logging.getLogger(__name__)
 TRAIN_CUTOFF = '2022-01-01'
 TEST_END     = '2025-12-31'
 TARGET       = 'Inflation_Rate'
-MODEL_PATH   = os.path.join(os.path.dirname(__file__), 'inflation_xgb.pkl')
+MODEL_NAME   = 'inflation_xgb'
 
 
 def _get_inflation_splits(
@@ -83,24 +83,20 @@ def train() -> xgb.XGBRegressor:
     rmse  = np.sqrt(mean_squared_error(y_test, preds))
     r2    = r2_score(y_test, preds)
 
-    print("\n--- Inflation Model Results ---")
-    print(f"{'Model':<22} {'RMSE':>8} {'R²':>8}")
-    print("-" * 42)
-    print(f"{'XGBoost':<22} {rmse:>8.4f} {r2:>8.4f}")
-    print()
+    log.info(f"XGBoost  RMSE={rmse:.4f}  R²={r2:.4f}")
 
-    joblib.dump(model, MODEL_PATH)
-    log.info(f"Model saved → {MODEL_PATH}")
+    save_model(MODEL_NAME, model)
+    log.info(f"Model saved to database as '{MODEL_NAME}'")
 
     return model
 
 
 def predict(features_dict: dict) -> float:
-    if not os.path.exists(MODEL_PATH):
-        log.info("inflation_xgb.pkl not found — training now...")
+    if not model_exists(MODEL_NAME):
+        log.info(f"'{MODEL_NAME}' not found in database — training now...")
         train()
 
-    model = joblib.load(MODEL_PATH)
+    model = load_model(MODEL_NAME)
     X = pd.DataFrame([features_dict])[MODEL_FEATURES]
     return float(model.predict(X)[0])
 
