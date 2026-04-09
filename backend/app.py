@@ -1,11 +1,11 @@
 # Flask app entry point
 
 import os
+import re
 import sys
 import logging
 
 from flask import Flask, jsonify, request
-from flask_cors import CORS
 
 _root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if _root not in sys.path:
@@ -71,31 +71,50 @@ def initialize_if_empty() -> dict:
     return {"status": "initialized"}
 
 
+_ALLOWED_ORIGINS = [
+    r"^http://localhost:\d+$",
+    r"^https://macrominds\.vercel\.app$",
+    r"^https://macrominds-.*\.vercel\.app$",
+]
+
+
+def is_allowed_origin(origin: str) -> bool:
+    if not origin:
+        return False
+    return any(re.match(pattern, origin) for pattern in _ALLOWED_ORIGINS)
+
+
 def create_app() -> Flask:
     app = Flask(__name__)
-
-    CORS(app, resources={r"/api/*": {
-        "origins": [
-            "http://localhost:5173",
-            "http://localhost:3000",
-            "https://macrominds.vercel.app",
-            "https://macrominds-git-main-jimmyl04s-projects.vercel.app",
-            "https://macrominds-hckxrvimi-jimmyl04s-projects.vercel.app",
-        ],
-        "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization"],
-    }})
 
     app.register_blueprint(api_bp)
 
     @app.before_request
-    def log_request():
+    def handle_preflight():
         log.info(
             "%s %s  origin=%s",
             request.method,
             request.path,
             request.headers.get("Origin", "-"),
         )
+        if request.method == "OPTIONS":
+            origin = request.headers.get("Origin", "")
+            response = app.make_default_options_response()
+            if is_allowed_origin(origin):
+                response.headers["Access-Control-Allow-Origin"] = origin
+                response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+                response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+            return response
+
+    @app.after_request
+    def add_cors_headers(response):
+        origin = request.headers.get("Origin", "")
+        if is_allowed_origin(origin):
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+        return response
 
     @app.route('/health')
     def health():
