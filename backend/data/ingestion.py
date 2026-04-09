@@ -1,14 +1,4 @@
-"""
-backend/data/ingestion.py
-
-Fetches economic data from FRED, BLS, and World Bank APIs,
-applies the same feature engineering used in MacroMinds.ipynb,
-and upserts results into the economic_data PostgreSQL table.
-
-Usage:
-    python -m backend.data.ingestion          # from project root
-    python backend/data/ingestion.py          # direct
-"""
+# fetches FRED/BLS/World Bank data and upserts to postgres
 
 import os
 import json
@@ -20,7 +10,7 @@ import pandas as pd
 from dotenv import load_dotenv
 from fredapi import Fred
 
-# Allow running as a standalone script from any working directory
+# needed when running as a script directly
 _root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 if _root not in sys.path:
     sys.path.insert(0, _root)
@@ -36,16 +26,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# 1. FRED
-# ---------------------------------------------------------------------------
-
 def fetch_fred_data() -> pd.DataFrame:
-    """
-    Fetch UNRATE, CPIAUCSL, ICSA, W875RX1 from FRED.
-    Resamples everything to Monthly Start (MS) — weekly ICSA is mean-aggregated.
-    Returns a DataFrame indexed by month-start dates.
-    """
     api_key = os.getenv('FRED_API_KEY')
     if not api_key:
         raise ValueError("FRED_API_KEY not found in environment / .env")
@@ -73,16 +54,7 @@ def fetch_fred_data() -> pd.DataFrame:
     return df_monthly
 
 
-# ---------------------------------------------------------------------------
-# 2. BLS
-# ---------------------------------------------------------------------------
-
 def fetch_bls_data() -> pd.DataFrame:
-    """
-    Fetch CPI-U All-Items (CUUR0000SA0) from the BLS public API v2.
-    Computes Year-over-Year inflation rate.
-    Returns a DataFrame indexed by month-start dates, or an empty DataFrame on failure.
-    """
     api_key = os.getenv('BLS_API_KEY')
 
     payload: dict = {
@@ -148,16 +120,7 @@ def fetch_bls_data() -> pd.DataFrame:
     return bls_df
 
 
-# ---------------------------------------------------------------------------
-# 3. World Bank
-# ---------------------------------------------------------------------------
-
 def fetch_worldbank_data() -> pd.DataFrame:
-    """
-    Fetch US GDP growth (annual) and Poverty Rate from the World Bank API.
-    Forward-fills annual values to monthly frequency.
-    Returns a DataFrame indexed by month-start dates, or an empty DataFrame on failure.
-    """
     indicators = {
         "GDP_Growth":   "NY.GDP.MKTP.KD.ZG",
         "Poverty_Rate": "SI.POV.NAHC",
@@ -196,7 +159,7 @@ def fetch_worldbank_data() -> pd.DataFrame:
     wb_df.sort_index(inplace=True)
     wb_df.drop(columns=["Year"], inplace=True)
 
-    # Forward-fill annual observations to monthly
+    # annual → monthly by forward-filling
     wb_monthly = wb_df.resample("MS").ffill()
     log.info(
         f"World Bank data ready: {len(wb_monthly)} rows  "
@@ -205,36 +168,23 @@ def fetch_worldbank_data() -> pd.DataFrame:
     return wb_monthly
 
 
-# ---------------------------------------------------------------------------
-# 4. Feature engineering  (mirrors MacroMinds.ipynb Cells 3, 7, 9)
-# ---------------------------------------------------------------------------
-
 def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Applies the same transformations from the Colab notebook:
-
-    1. Resampling is already done in fetch_fred_data (MS, mean + ffill).
-    2. YoY Inflation Rate  : CPI pct_change(12) * 100
-    3. YoY Income Growth   : Personal_Income pct_change(12) * 100
-    4. Lag features        : Claims_Lag1, Inflation_Lag1, Income_Lag1, Unemployment_Lag1
-    5. Z-score normalisation: Unemployment, Weekly_Claims, Income_Growth
-    """
     df = df.copy()
 
-    # --- YoY growth rates ---
+    # yoy rates
     df["Inflation_Rate"] = df["Inflation"].pct_change(12) * 100
     df["Income_Growth"]  = df["Personal_Income"].pct_change(12) * 100
 
-    # --- Lag features (t-1) ---
+    # lag features (t-1)
     df["Claims_Lag1"]       = df["Weekly_Claims"].shift(1)
     df["Inflation_Lag1"]    = df["Inflation_Rate"].shift(1)
     df["Income_Lag1"]       = df["Income_Growth"].shift(1)
     df["Unemployment_Lag1"] = df["Unemployment"].shift(1)
 
-    # Drop rows whose YoY rates are still NaN (first 12 months)
+    # first 12 months won't have yoy data yet
     df.dropna(subset=["Inflation_Rate", "Income_Growth"], inplace=True)
 
-    # --- Z-score normalisation (full-history mean/std) ---
+    # z-score (full-history mean/std)
     for col in ["Unemployment", "Weekly_Claims", "Income_Growth"]:
         df[f"{col}_Z"] = (df[col] - df[col].mean()) / df[col].std()
 
@@ -245,11 +195,7 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ---------------------------------------------------------------------------
-# 5. Write to PostgreSQL  (upsert on unique(date, source))
-# ---------------------------------------------------------------------------
-
-# Maps economic_data column names → DataFrame column names
+# db col → df col
 _DB_COL_MAP = {
     "unemployment":    "Unemployment",
     "inflation_cpi":   "Inflation",
@@ -270,11 +216,6 @@ def _to_float_or_none(val) -> float | None:
 
 
 def write_to_db(df: pd.DataFrame, source: str = "FRED") -> int:
-    """
-    Upserts the processed DataFrame into the economic_data table.
-    ON CONFLICT (date, source) → updates all non-key columns.
-    Returns the number of rows upserted.
-    """
     from sqlalchemy import MetaData
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -311,14 +252,9 @@ def write_to_db(df: pd.DataFrame, source: str = "FRED") -> int:
     return len(rows)
 
 
-# ---------------------------------------------------------------------------
-# 6. Orchestration
-# ---------------------------------------------------------------------------
-
 def run_ingestion() -> pd.DataFrame:
     log.info("========== MacroMinds Data Ingestion ==========")
 
-    # --- Fetch ---
     log.info("--- Fetching FRED data ---")
     df_fred = fetch_fred_data()
 
@@ -328,11 +264,9 @@ def run_ingestion() -> pd.DataFrame:
     log.info("--- Fetching World Bank data ---")
     df_wb = fetch_worldbank_data()
 
-    # --- Feature engineering on FRED base ---
     log.info("--- Engineering features ---")
     df = engineer_features(df_fred)
 
-    # --- Merge supplementary sources ---
     if not df_bls.empty:
         df = df.join(df_bls, how="left")
         log.info("Merged BLS data")
@@ -344,7 +278,6 @@ def run_ingestion() -> pd.DataFrame:
 
     log.info(f"Final dataset: {len(df)} rows × {len(df.columns)} columns")
 
-    # --- Write ---
     log.info("--- Writing to PostgreSQL ---")
     n = write_to_db(df)
 

@@ -1,9 +1,7 @@
 import {
-  LineChart,
+  ComposedChart,
   Line,
-  BarChart,
   Bar,
-  AreaChart,
   Area,
   XAxis,
   YAxis,
@@ -23,7 +21,7 @@ import {
   type BacktestPoint,
   type ForecastPoint,
 } from "@/app/services/api";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 
 interface EconomicChartProps {
   selectedMetrics: string[];
@@ -34,9 +32,10 @@ interface EconomicChartProps {
   backtestData: BacktestPoint[];
   forecastData: ForecastPoint[];
   loading: boolean;
+  highlightDate?: string | null;
 }
 
-// Merged row — contains actual values + optional prediction keys
+// merged row — actual values + optional prediction keys + Prophet confidence bands
 interface ChartRow {
   date: string;
   unemployment?: number | null;
@@ -44,8 +43,25 @@ interface ChartRow {
   gdpGrowth?: number | null;
   unemployment_pred?: number | null;
   inflation_pred?: number | null;
+  // stacked-area CI bands (forecast zone only — null in historical rows)
+  unemployment_ci_lower?: number | null;
+  unemployment_ci_band?:  number | null;  // upper - lower
+  inflation_ci_lower?:    number | null;
+  inflation_ci_band?:     number | null;  // upper - lower
   isForecast?: boolean;
 }
+
+// Internal dataKeys used only for rendering the CI bands — never shown in legend/tooltip
+const BAND_KEYS = new Set([
+  "unemployment_ci_lower", "unemployment_ci_band",
+  "inflation_ci_lower",    "inflation_ci_band",
+]);
+
+// Config for the CI legend entries injected manually
+const CI_META: Record<string, { label: string; fill: string }> = {
+  unemployment: { label: "Unemployment Confidence Interval", fill: "rgba(239,68,68,0.30)" },
+  inflation:    { label: "Inflation Confidence Interval",    fill: "rgba(245,158,11,0.30)" },
+};
 
 export function EconomicChart({
   selectedMetrics,
@@ -56,15 +72,17 @@ export function EconomicChart({
   backtestData,
   forecastData,
   loading,
+  highlightDate,
 }: EconomicChartProps) {
   const [showPredictions, setShowPredictions] = useState(true);
 
-  // Build the merged dataset
   const buildMergedData = (): { rows: ChartRow[]; nowLabel: string | null } => {
-    // Step 1: filter historical by selected years
-    let filtered = historicalData.filter((d) => selectedYears.includes(d.year!));
+    // --- historical: filter by year then apply time-period thinning ---
+    // "all" bypasses the year selector entirely so every loaded row is visible
+    let filtered = timePeriod === "all"
+      ? historicalData
+      : historicalData.filter((d) => selectedYears.includes(d.year!));
 
-    // Step 2: apply time-period trimming on historical
     if (timePeriod === "6m") {
       filtered = filtered.slice(-6);
     } else if (timePeriod === "quarterly") {
@@ -81,11 +99,9 @@ export function EconomicChart({
     }
     // "all" → keep everything
 
-    // Build a lookup from backtestData by date string
     const backtestByDate: Record<string, BacktestPoint> = {};
     backtestData.forEach((b) => { backtestByDate[b.date] = b; });
 
-    // Merge historical + backtest predictions
     const historicalRows: ChartRow[] = filtered.map((d) => {
       const bt = backtestByDate[d.date];
       return {
@@ -95,7 +111,12 @@ export function EconomicChart({
         gdpGrowth:         d.gdpGrowth,
         unemployment_pred: bt?.predicted_unemployment ?? null,
         inflation_pred:    bt?.predicted_inflation    ?? null,
-        isForecast:        false,
+        // keep band keys null so CI areas don't render in the historical zone
+        unemployment_ci_lower: null,
+        unemployment_ci_band:  null,
+        inflation_ci_lower:    null,
+        inflation_ci_band:     null,
+        isForecast: false,
       };
     });
 
@@ -103,72 +124,290 @@ export function EconomicChart({
       ? historicalRows[historicalRows.length - 1].date
       : null;
 
-    // Append forecast rows
-    const forecastRows: ChartRow[] = forecastData.map((f) => ({
-      date:              f.date,
-      unemployment:      null,
-      inflation:         null,
-      gdpGrowth:         null,
-      unemployment_pred: f.predicted_unemployment,
-      inflation_pred:    f.predicted_inflation,
-      isForecast:        true,
-    }));
+    // --- forecast rows ---
+    const allForecastRows: ChartRow[] = forecastData.map((f) => {
+      const unempLower = f.predicted_unemployment_lower ?? null;
+      const unempUpper = f.predicted_unemployment_upper ?? null;
+      const infLower   = f.predicted_inflation_lower   ?? null;
+      const infUpper   = f.predicted_inflation_upper   ?? null;
+      return {
+        date:              f.date,
+        unemployment:      null,
+        inflation:         null,
+        gdpGrowth:         null,
+        unemployment_pred: f.predicted_unemployment,
+        inflation_pred:    f.predicted_inflation,
+        unemployment_ci_lower: unempLower,
+        unemployment_ci_band:
+          unempLower != null && unempUpper != null ? unempUpper - unempLower : null,
+        inflation_ci_lower: infLower,
+        inflation_ci_band:
+          infLower != null && infUpper != null ? infUpper - infLower : null,
+        isForecast: true,
+      };
+    });
+
+    // Anchor CI bands to the "Now" point so shading starts exactly at the divider.
+    // Without this the stacked <Area> only begins at the first forecast tick,
+    // leaving a one-point gap between the "Now" line and the visible shading.
+    if (historicalRows.length > 0 && allForecastRows.length > 0) {
+      const first = allForecastRows[0];
+      historicalRows[historicalRows.length - 1] = {
+        ...historicalRows[historicalRows.length - 1],
+        unemployment_ci_lower: first.unemployment_ci_lower,
+        unemployment_ci_band:  first.unemployment_ci_band,
+        inflation_ci_lower:    first.inflation_ci_lower,
+        inflation_ci_band:     first.inflation_ci_band,
+      };
+    }
+
+    let forecastRows = (() => {
+      if (timePeriod === "quarterly") return allForecastRows.filter((_, i) => (i + 1) % 3 === 0);
+      if (timePeriod === "6m")        return allForecastRows.filter((_, i) => (i + 1) % 6 === 0);
+      if (timePeriod === "annually")  return allForecastRows.filter((_, i) => (i + 1) % 12 === 0);
+      return allForecastRows;
+    })();
+
+    // If the highlight date is a forecast point that got filtered out by time-period
+    // thinning, inject it back so Recharts has a matching x-axis tick to anchor the
+    // ReferenceLine against. Without this the line silently disappears.
+    if (highlightDate) {
+      const inForecast  = forecastData.some((f) => f.date === highlightDate);
+      const inRows      = forecastRows.some((r) => r.date === highlightDate);
+      if (inForecast && !inRows) {
+        const fp = forecastData.find((f) => f.date === highlightDate)!;
+        const ul = fp.predicted_unemployment_lower ?? null;
+        const uu = fp.predicted_unemployment_upper ?? null;
+        const il = fp.predicted_inflation_lower    ?? null;
+        const iu = fp.predicted_inflation_upper    ?? null;
+        const injected: ChartRow = {
+          date:              fp.date,
+          unemployment:      null,
+          inflation:         null,
+          gdpGrowth:         null,
+          unemployment_pred: fp.predicted_unemployment,
+          inflation_pred:    fp.predicted_inflation,
+          unemployment_ci_lower: ul,
+          unemployment_ci_band:  ul != null && uu != null ? uu - ul : null,
+          inflation_ci_lower:    il,
+          inflation_ci_band:     il != null && iu != null ? iu - il : null,
+          isForecast: true,
+        };
+        // Insert in chronological order using the source forecastData index as key
+        const fcstDates  = forecastData.map((f) => f.date);
+        const targetIdx  = fcstDates.indexOf(highlightDate);
+        let insertPos    = forecastRows.length;
+        for (let i = 0; i < forecastRows.length; i++) {
+          if (fcstDates.indexOf(forecastRows[i].date) > targetIdx) {
+            insertPos = i;
+            break;
+          }
+        }
+        forecastRows = [
+          ...forecastRows.slice(0, insertPos),
+          injected,
+          ...forecastRows.slice(insertPos),
+        ];
+      }
+    }
 
     return { rows: [...historicalRows, ...forecastRows], nowLabel };
   };
 
   const { rows: chartData, nowLabel } = buildMergedData();
 
-  const xAxisProps = {
-    dataKey: "date",
-    tick:    { fontSize: 11 },
-    stroke:  "#6b7280",
+  // Fully custom tooltip — shows CI range as a sub-line below the model prediction
+  const customTooltip = ({ active, payload, label }: any) => {
+    if (!active || !payload?.length) return null;
+
+    // The raw ChartRow for this point lives on any payload item's .payload
+    const row: ChartRow = payload[0]?.payload ?? {};
+
+    // Entries the user should actually see (no band internals, no null values)
+    const visible = (payload as any[]).filter(
+      (p) => !BAND_KEYS.has(p.dataKey) && p.value != null
+    );
+    if (!visible.length) return null;
+
+    return (
+      <div style={{
+        backgroundColor: "white",
+        border:          "1px solid #e5e7eb",
+        borderRadius:    8,
+        padding:         "10px 12px",
+        fontSize:        12,
+        minWidth:        210,
+      }}>
+        <p style={{ fontWeight: 600, marginBottom: 8, color: "#111827", fontSize: 13 }}>
+          {label}
+        </p>
+        {visible.map((entry: any) => {
+          // For model prediction lines, pull CI bounds straight from the ChartRow
+          let ciLower: number | null = null;
+          let ciUpper: number | null = null;
+          if (entry.dataKey === "unemployment_pred") {
+            ciLower = row.unemployment_ci_lower ?? null;
+            ciUpper = ciLower != null && row.unemployment_ci_band != null
+              ? ciLower + row.unemployment_ci_band : null;
+          } else if (entry.dataKey === "inflation_pred") {
+            ciLower = row.inflation_ci_lower ?? null;
+            ciUpper = ciLower != null && row.inflation_ci_band != null
+              ? ciLower + row.inflation_ci_band : null;
+          }
+
+          return (
+            <div key={entry.dataKey} style={{ marginBottom: 4 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{
+                  width: 8, height: 8, borderRadius: "50%",
+                  backgroundColor: entry.color, flexShrink: 0,
+                }} />
+                <span style={{ color: "#374151" }}>
+                  {entry.name}:{" "}
+                  <strong>{(entry.value as number).toFixed(2)}%</strong>
+                </span>
+              </div>
+              {ciLower != null && ciUpper != null && (
+                <p style={{
+                  color: "#9ca3af", marginLeft: 14, marginTop: 2, fontSize: 11,
+                }}>
+                  Confidence Range: {ciLower.toFixed(2)}% – {ciUpper.toFixed(2)}%
+                </p>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    );
   };
 
-  const yAxisProps = {
-    tick:   { fontSize: 12 },
-    stroke: "#6b7280",
-    label:  {
-      value:    "Percentage (%)",
-      angle:    -90,
-      position: "insideLeft" as const,
-      style:    { fontSize: 12 },
-    },
+  // Custom legend — filters out internal band series, injects CI legend entries
+  const legendContent = ({ payload }: any) => {
+    const visible = ((payload as any[]) ?? []).filter(
+      (p) => !BAND_KEYS.has(p.dataKey)
+    );
+
+    const ciEntries: Array<{ key: string; label: string; fill: string }> = [];
+    if (showPredictions) {
+      for (const mk of selectedMetrics) {
+        if (CI_META[mk]) ciEntries.push({ key: `ci_${mk}`, ...CI_META[mk] });
+      }
+    }
+
+    if (!visible.length && !ciEntries.length) return null;
+
+    return (
+      <ul style={{
+        display: "flex", flexWrap: "wrap", gap: "8px 20px",
+        paddingTop: 16, margin: 0, listStyle: "none",
+      }}>
+        {visible.map((p: any) => (
+          <li key={p.dataKey} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#374151" }}>
+            {chartType === "line" ? (
+              <span style={{ display: "inline-block", width: 16, height: 2, backgroundColor: p.color, flexShrink: 0 }} />
+            ) : (
+              <span style={{ display: "inline-block", width: 12, height: 12, backgroundColor: p.color, flexShrink: 0 }} />
+            )}
+            {p.value}
+          </li>
+        ))}
+        {ciEntries.map((ci) => (
+          <li key={ci.key} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#374151" }}>
+            <span style={{
+              display: "inline-block", width: 12, height: 12,
+              backgroundColor: ci.fill,
+              border: "1px solid rgba(0,0,0,0.12)",
+              flexShrink: 0,
+            }} />
+            {ci.label}
+          </li>
+        ))}
+      </ul>
+    );
   };
 
-  const tooltipProps = {
-    contentStyle: {
-      backgroundColor: "white",
-      border:          "1px solid #e5e7eb",
-      borderRadius:    "8px",
-      padding:         "12px",
-    },
-    formatter: (value: number | null) =>
-      value != null ? `${value.toFixed(2)}%` : "—",
-  };
-
-  const legendProps = {
-    wrapperStyle: { paddingTop: "20px" },
-    iconType:     (chartType === "line" ? "line" : "rect") as any,
-  };
-
-  // Render solid actual lines + dashed prediction lines for a given chart type
   const renderLines = () => {
-    const elements: React.ReactNode[] = [];
+    // CI bands rendered first so they sit behind the data lines
+    const bandElements: ReactNode[] = [];
+    const metricElements: ReactNode[] = [];
+
+    // CI bands render in all chart types (area mode uses slightly higher opacity
+    // so the shading stays distinguishable from the metric fill areas below it)
+    const bandFillOpacity = chartType === "area" ? 0.20 : 0.13;
+
+    if (showPredictions) {
+      if (selectedMetrics.includes("unemployment")) {
+        bandElements.push(
+          <Area
+            key="unemp_ci_base"
+            dataKey="unemployment_ci_lower"
+            stackId="ci_unemp"
+            fill="transparent"
+            stroke="none"
+            legendType="none"
+            connectNulls={false}
+            dot={false}
+            activeDot={false}
+            isAnimationActive={false}
+          />,
+          <Area
+            key="unemp_ci_band"
+            dataKey="unemployment_ci_band"
+            stackId="ci_unemp"
+            fill={`rgba(239,68,68,${bandFillOpacity})`}
+            stroke="none"
+            legendType="none"
+            connectNulls={false}
+            dot={false}
+            activeDot={false}
+            isAnimationActive={false}
+          />
+        );
+      }
+      if (selectedMetrics.includes("inflation")) {
+        bandElements.push(
+          <Area
+            key="inf_ci_base"
+            dataKey="inflation_ci_lower"
+            stackId="ci_inf"
+            fill="transparent"
+            stroke="none"
+            legendType="none"
+            connectNulls={false}
+            dot={false}
+            activeDot={false}
+            isAnimationActive={false}
+          />,
+          <Area
+            key="inf_ci_band"
+            dataKey="inflation_ci_band"
+            stackId="ci_inf"
+            fill={`rgba(245,158,11,${bandFillOpacity})`}
+            stroke="none"
+            legendType="none"
+            connectNulls={false}
+            dot={false}
+            activeDot={false}
+            isAnimationActive={false}
+          />
+        );
+      }
+    }
 
     selectedMetrics.forEach((metricKey) => {
       const metric = metricOptions.find((m) => m.value === metricKey);
       if (!metric) return;
 
       const solidProps = {
-        key:         metricKey,
-        dataKey:     metricKey,
-        stroke:      metric.color,
-        fill:        metric.color,
-        name:        metric.label,
+        key:          metricKey,
+        dataKey:      metricKey,
+        stroke:       metric.color,
+        fill:         metric.color,
+        name:         metric.label,
         connectNulls: false,
       };
 
+      // connectNulls: true so the pred line bridges backtest → "Now" → forecast
       const predProps = metric.predKey
         ? {
             key:          `${metricKey}_pred`,
@@ -176,114 +415,138 @@ export function EconomicChart({
             stroke:       metric.color,
             fill:         metric.color,
             name:         `${metric.label} (Model)`,
-            connectNulls: false,
+            connectNulls: true,
           }
         : null;
 
       if (chartType === "line") {
-        elements.push(
-          <Line
-            {...solidProps}
-            type="monotone"
-            strokeWidth={2}
-            dot={false}
-            activeDot={{ r: 4 }}
-          />
+        metricElements.push(
+          <Line {...solidProps} type="monotone" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
         );
         if (showPredictions && predProps) {
-          elements.push(
-            <Line
-              {...predProps}
-              type="monotone"
-              strokeWidth={2}
-              strokeDasharray="5 3"
-              dot={false}
-              activeDot={{ r: 4 }}
-            />
+          metricElements.push(
+            <Line {...predProps} type="monotone" strokeWidth={2} strokeDasharray="5 3" dot={false} activeDot={{ r: 4 }} />
           );
         }
       } else if (chartType === "bar") {
-        elements.push(<Bar {...solidProps} />);
+        metricElements.push(<Bar {...solidProps} />);
         if (showPredictions && predProps) {
-          elements.push(<Bar {...predProps} fillOpacity={0.45} />);
+          // dashed Line overlay rather than a Bar — keeps the prediction readable
+          // as a continuous trend line rather than competing discrete bars
+          metricElements.push(
+            <Line {...predProps} type="monotone" strokeWidth={2} strokeDasharray="5 3" dot={false} activeDot={{ r: 4 }} />
+          );
         }
       } else {
-        // area
-        elements.push(
-          <Area
-            {...solidProps}
-            type="monotone"
-            strokeWidth={2}
-            fillOpacity={0.15}
-          />
+        metricElements.push(
+          <Area {...solidProps} type="monotone" strokeWidth={2} fillOpacity={0.15} />
         );
         if (showPredictions && predProps) {
-          elements.push(
-            <Area
-              {...predProps}
-              type="monotone"
-              strokeWidth={2}
-              strokeDasharray="5 3"
-              fillOpacity={0.08}
-            />
+          metricElements.push(
+            <Area {...predProps} type="monotone" strokeWidth={2} strokeDasharray="5 3" fillOpacity={0.08} />
           );
         }
       }
     });
 
-    return elements;
+    return [...bandElements, ...metricElements];
   };
 
-  const renderChart = () => {
-    const commonProps = { data: chartData };
+  const nowLine = nowLabel ? (
+    <ReferenceLine
+      x={nowLabel}
+      stroke="#6b7280"
+      strokeDasharray="4 3"
+      label={{ value: "Now", position: "top", fontSize: 11, fill: "#6b7280" }}
+    />
+  ) : null;
 
-    const nowLine = nowLabel ? (
-      <ReferenceLine
-        x={nowLabel}
-        stroke="#6b7280"
-        strokeDasharray="4 3"
-        label={{ value: "Now", position: "top", fontSize: 11, fill: "#6b7280" }}
-      />
-    ) : null;
+  // Look up values for the highlighted date directly from raw props (not filtered chartData)
+  // so the pinned tooltip always has data regardless of the current time-period filter.
+  const highlightValues = highlightDate ? (() => {
+    const h = historicalData.find((d) => d.date === highlightDate);
+    if (h) return {
+      type:      "historical" as const,
+      unemp:     h.unemployment,
+      inflation: h.inflation,
+    };
+    const f = forecastData.find((f) => f.date === highlightDate);
+    if (f) return {
+      type:      "forecast" as const,
+      unemp:     f.predicted_unemployment,
+      inflation: f.predicted_inflation,
+    };
+    return null;
+  })() : null;
 
-    if (chartType === "line") {
-      return (
-        <LineChart {...commonProps}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-          <XAxis {...xAxisProps} />
-          <YAxis {...yAxisProps} />
-          <Tooltip {...tooltipProps} />
-          <Legend {...legendProps} />
-          {nowLine}
-          {renderLines()}
-        </LineChart>
-      );
-    } else if (chartType === "bar") {
-      return (
-        <BarChart {...commonProps}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-          <XAxis {...xAxisProps} />
-          <YAxis {...yAxisProps} />
-          <Tooltip {...tooltipProps} />
-          <Legend {...legendProps} />
-          {nowLine}
-          {renderLines()}
-        </BarChart>
-      );
-    } else {
-      return (
-        <AreaChart {...commonProps}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-          <XAxis {...xAxisProps} />
-          <YAxis {...yAxisProps} />
-          <Tooltip {...tooltipProps} />
-          <Legend {...legendProps} />
-          {nowLine}
-          {renderLines()}
-        </AreaChart>
-      );
-    }
+  // Custom SVG tooltip box pinned to the top of the highlight reference line
+  const HighlightLabel = (props: any) => {
+    const { viewBox } = props;
+    if (!viewBox || !highlightValues) return null;
+    const { x, y } = viewBox as { x: number; y: number };
+
+    const lines: Array<{ text: string; color: string }> = [];
+    if (highlightValues.unemp != null)
+      lines.push({ text: `Unemployment: ${highlightValues.unemp.toFixed(2)}%`, color: "#ef4444" });
+    if (highlightValues.inflation != null)
+      lines.push({ text: `Inflation: ${highlightValues.inflation.toFixed(2)}%`, color: "#d97706" });
+
+    const pad     = 8;
+    const lineH   = 15;
+    const bWidth  = 182;
+    const bHeight = pad * 2 + lineH * (lines.length + 1);
+    // Dot sits right at the top of the chart area; box floats below it
+    const dotY  = y + 2;
+    const boxY  = dotY + 10;
+    const boxX  = x - bWidth / 2;
+    const isFC  = highlightValues.type === "forecast";
+
+    return (
+      <g>
+        {/* vertical dot marker */}
+        <circle cx={x} cy={dotY} r={5} fill="#6366f1" stroke="white" strokeWidth={2} />
+        {/* tooltip box */}
+        <rect
+          x={boxX} y={boxY}
+          width={bWidth} height={bHeight}
+          rx={4}
+          fill="white"
+          stroke={isFC ? "#c7d2fe" : "#a7f3d0"}
+          strokeWidth={1.5}
+        />
+        {/* type badge text */}
+        <text
+          x={boxX + pad} y={boxY + pad + lineH * 0.75}
+          fontSize={10} fontWeight={700}
+          fill={isFC ? "#4f46e5" : "#059669"}
+        >
+          {isFC ? "Forecast" : "Historical"}
+        </text>
+        {/* metric lines */}
+        {lines.map((line, i) => (
+          <text
+            key={i}
+            x={boxX + pad}
+            y={boxY + pad + lineH * (i + 1.85)}
+            fontSize={11}
+            fill={line.color}
+          >
+            {line.text}
+          </text>
+        ))}
+      </g>
+    );
   };
+
+  const highlightLine = highlightDate ? (
+    <ReferenceLine
+      x={highlightDate}
+      stroke="#6366f1"
+      strokeWidth={2}
+      strokeDasharray="3 2"
+      label={<HighlightLabel />}
+    />
+  ) : null;
 
   return (
     <Card className="p-6">
@@ -316,7 +579,21 @@ export function EconomicChart({
         </div>
       ) : (
         <ResponsiveContainer width="100%" height={400}>
-          {renderChart()!}
+          {/* ComposedChart lets <Area> CI bands coexist with Line and Bar series */}
+          <ComposedChart data={chartData}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+            <XAxis dataKey="date" tick={{ fontSize: 11 }} stroke="#6b7280" />
+            <YAxis
+              tick={{ fontSize: 12 }}
+              stroke="#6b7280"
+              label={{ value: "Percentage (%)", angle: -90, position: "insideLeft", style: { fontSize: 12 } }}
+            />
+            <Tooltip content={customTooltip} />
+            <Legend content={legendContent} />
+            {nowLine}
+            {highlightLine}
+            {renderLines()}
+          </ComposedChart>
         </ResponsiveContainer>
       )}
     </Card>

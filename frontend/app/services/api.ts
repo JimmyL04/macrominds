@@ -1,11 +1,6 @@
-// frontend/app/services/api.ts
-// Typed fetch functions for the MacroMinds Flask backend.
+// typed fetch wrappers for the Flask backend
 
 const BASE_URL = "http://localhost:5001";
-
-// ---------------------------------------------------------------------------
-// Types — API responses
-// ---------------------------------------------------------------------------
 
 export interface PredictionsResponse {
   date: string | null;
@@ -42,32 +37,29 @@ export interface SimulationResponse {
   inflation_prediction: number;
 }
 
-/** One row from GET /api/backtest — actual vs. model-predicted values */
 export interface BacktestPoint {
-  date: string;                       // "Jan 2023" after transform
+  date: string;       // "Jan 2023" after transform
   actual_unemployment: number | null;
   predicted_unemployment: number | null;
   actual_inflation: number | null;
   predicted_inflation: number | null;
 }
 
-/** One row from GET /api/forecast — forward predictions only */
 export interface ForecastPoint {
-  date: string;                       // "Apr 2026" — already formatted by backend
+  date: string;       // "Apr 2026", already formatted by backend
   predicted_unemployment: number;
+  predicted_unemployment_lower: number;
+  predicted_unemployment_upper: number;
   predicted_inflation: number;
+  predicted_inflation_lower: number;
+  predicted_inflation_upper: number;
 }
-
-// ---------------------------------------------------------------------------
-// Types — Chart / UI shapes
-// ---------------------------------------------------------------------------
 
 export interface TimeSeriesDataPoint {
   date: string;             // "Jan 2022"
   unemployment: number | null;
   inflation: number | null; // mapped from inflation_rate
   gdpGrowth: number | null; // mapped from gdp_growth
-  povertyRate: number | null;
   year?: number;
   month?: string;
 }
@@ -80,11 +72,7 @@ export interface EconomicMetric {
   invertColors?: boolean;
 }
 
-// ---------------------------------------------------------------------------
-// Static UI config
-// ---------------------------------------------------------------------------
-
-/** predKey is the chart dataKey used for model-predicted values of this metric */
+// predKey = recharts dataKey for the dashed prediction line
 export const metricOptions = [
   { value: "unemployment", label: "Unemployment Rate", color: "#ef4444", predKey: "unemployment_pred" as string | null },
   { value: "inflation",    label: "Inflation Rate",    color: "#f59e0b", predKey: "inflation_pred"    as string | null },
@@ -97,11 +85,13 @@ export const chartTypeOptions = [
   { value: "area", label: "Area Chart" },
 ];
 
-export const availableYears = [2022, 2023, 2024, 2025];
-
-// ---------------------------------------------------------------------------
-// Transformer — HistoricalRow[] → TimeSeriesDataPoint[]
-// ---------------------------------------------------------------------------
+// generates [startYear, ..., currentYear] — updates automatically each calendar year
+export function getAvailableYears(startYear = 2022): number[] {
+  const end = new Date().getFullYear();
+  const years: number[] = [];
+  for (let y = startYear; y <= end; y++) years.push(y);
+  return years;
+}
 
 export const MONTH_NAMES = [
   "Jan","Feb","Mar","Apr","May","Jun",
@@ -118,18 +108,30 @@ export function transformHistoricalData(rows: HistoricalRow[]): TimeSeriesDataPo
       unemployment: row.unemployment,
       inflation:    row.inflation_rate,
       gdpGrowth:    row.gdp_growth,
-      povertyRate:  null,
       year,
       month,
     };
   });
 }
 
-// ---------------------------------------------------------------------------
-// API functions
-// ---------------------------------------------------------------------------
+export interface RefreshResponse {
+  status: "success" | "error";
+  last_updated: string | null;
+  new_records: number;
+  message?: string;
+}
 
-/** GET /api/predictions — latest nowcast for unemployment and inflation */
+// POST /api/refresh — triggers ingestion pipeline
+export async function fetchApiRefresh(): Promise<RefreshResponse> {
+  const res = await fetch(`${BASE_URL}/api/refresh`, { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.message ?? `refresh request failed (${res.status})`);
+  }
+  return res.json();
+}
+
+// GET /api/predictions
 export async function fetchPredictions(): Promise<PredictionsResponse> {
   const res = await fetch(`${BASE_URL}/api/predictions`);
   if (!res.ok) {
@@ -139,7 +141,7 @@ export async function fetchPredictions(): Promise<PredictionsResponse> {
   return res.json();
 }
 
-/** GET /api/historical — historical DB rows, optionally bounded by date */
+// GET /api/historical
 export async function fetchHistoricalData(
   startDate?: string,
   endDate?: string,
@@ -158,7 +160,7 @@ export async function fetchHistoricalData(
   return transformHistoricalData(json.data);
 }
 
-/** GET /api/simulate — what-if scenario prediction */
+// GET /api/simulate
 export async function fetchSimulation(
   claims: number,
   inflation: number,
@@ -179,10 +181,7 @@ export async function fetchSimulation(
   return res.json();
 }
 
-/**
- * GET /api/backtest — model accuracy over historical data.
- * Returns BacktestPoint[] with dates already transformed to "Mon YYYY" strings.
- */
+// GET /api/backtest — transforms YYYY-MM-DD dates to "Mon YYYY" for chart alignment
 export async function fetchBacktest(startDate?: string): Promise<BacktestPoint[]> {
   const params = new URLSearchParams();
   if (startDate) params.set("start_date", startDate);
@@ -194,7 +193,6 @@ export async function fetchBacktest(startDate?: string): Promise<BacktestPoint[]
     throw new Error(body.error ?? `backtest request failed (${res.status})`);
   }
   const json = await res.json();
-  // Transform "YYYY-MM-DD" dates to "Mon YYYY" for chart alignment
   return (json.data as any[]).map((row) => {
     const d     = new Date(row.date);
     const month = MONTH_NAMES[d.getUTCMonth()];
@@ -203,10 +201,7 @@ export async function fetchBacktest(startDate?: string): Promise<BacktestPoint[]
   });
 }
 
-/**
- * GET /api/forecast?months=N — rolling forward nowcast.
- * Dates are already "Mon YYYY" strings from the backend.
- */
+// GET /api/forecast
 export async function fetchForecast(months: number): Promise<ForecastPoint[]> {
   const res = await fetch(`${BASE_URL}/api/forecast?months=${months}`);
   if (!res.ok) {
