@@ -1,40 +1,30 @@
-# Environment & secrets
-.env
-*.env
-!frontend/.env
-
 # Python
 __pycache__/
 *.py[cod]
 *.pyo
-*.so
-*.egg-info/
-dist/
-build/
-venv/
-.venv/
-
-# ML model files (too large for GitHub)
+*.pyd
+.Python
 *.pkl
-*.joblib
-*.h5
+.venv/
+venv/
 
-# IDE files
-.vscode/
-.idea/
-*.swp
-.DS_Store
-
-# Jupyter/Colab
-.ipynb_checkpoints/
-
-# Database
-*.db
-*.sqlite3
+# Environment
+.env
+*.env
 
 # Node
 node_modules/
 frontend/node_modules/
+.vite/
+dist/
 
-# Vite cache
-.vite
+# IDE
+.DS_Store
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Git
+.git/
