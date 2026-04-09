@@ -4,12 +4,20 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
 def get_engine():
-    user = os.getenv('DB_USER', 'jimbosmac')
+    database_url = os.environ.get('DATABASE_URL')
+    if database_url:
+        # Railway injects postgres:// but SQLAlchemy needs postgresql://
+        if database_url.startswith('postgres://'):
+            database_url = database_url.replace('postgres://', 'postgresql://', 1)
+        return create_engine(database_url)
+
+    user     = os.getenv('DB_USER', 'jimbosmac')
     password = os.getenv('DB_PASS', '')
-    host = os.getenv('DB_HOST', 'localhost')
-    port = os.getenv('DB_PORT', '5432')
-    db_name = os.getenv('DB_NAME', 'macrominds')
+    host     = os.getenv('DB_HOST', 'localhost')
+    port     = os.getenv('DB_PORT', '5432')
+    db_name  = os.getenv('DB_NAME', 'macrominds')
 
     if password:
         url = f"postgresql://{user}:{password}@{host}:{port}/{db_name}"
@@ -17,6 +25,7 @@ def get_engine():
         url = f"postgresql://{user}@{host}:{port}/{db_name}"
 
     return create_engine(url)
+
 
 def test_connection():
     try:
@@ -26,11 +35,12 @@ def test_connection():
                 __import__('sqlalchemy').text("SELECT COUNT(*) FROM economic_data")
             )
             count = result.scalar()
-            print(f"Connected to macrominds! Rows in economic_data: {count}")
+            print(f"Connected! Rows in economic_data: {count}")
         return True
     except Exception as e:
         print(f"Connection failed: {e}")
         return False
+
 
 if __name__ == "__main__":
     test_connection()
