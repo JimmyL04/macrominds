@@ -1,22 +1,11 @@
-"""
-backend/app.py
-
-MacroMinds Flask application entry point.
-
-Registers the API blueprint and starts the development server.
-
-Usage
------
-    python -m backend.app          # from project root
-    python backend/app.py          # direct
-    flask --app backend.app run    # via Flask CLI
-"""
+# Flask app entry point
 
 import os
 import sys
 import logging
 
 from flask import Flask
+from flask_cors import CORS
 
 _root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if _root not in sys.path:
@@ -35,7 +24,9 @@ log = logging.getLogger(__name__)
 def create_app() -> Flask:
     app = Flask(__name__)
 
-    # Register blueprints
+    # allow vite dev server to call the api
+    CORS(app, origins=["http://localhost:5173", "http://127.0.0.1:5173"])
+
     app.register_blueprint(api_bp)
 
     @app.route('/health')
@@ -55,6 +46,6 @@ if __name__ == '__main__':
     app = create_app()
     app.run(
         host=os.getenv('FLASK_HOST', '0.0.0.0'),
-        port=int(os.getenv('FLASK_PORT', 5000)),
+        port=int(os.getenv('FLASK_PORT', 5001)),
         debug=os.getenv('FLASK_DEBUG', 'true').lower() == 'true',
     )

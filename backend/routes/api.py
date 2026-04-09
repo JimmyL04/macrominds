@@ -1,23 +1,4 @@
-"""
-backend/routes/api.py
-
-Flask Blueprint exposing the MacroMinds prediction API.
-
-Routes
-------
-GET /api/predictions
-    Returns the latest unemployment and inflation nowcasts using
-    get_latest_features() and both model predict() functions.
-
-GET /api/historical
-    Returns historical economic data from the database.
-    Optional query params: start_date, end_date  (YYYY-MM-DD)
-
-GET /api/simulate
-    What-if scenario prediction.
-    Required query params: claims, inflation, income, prev_unemployment
-    Returns unemployment and inflation predictions for the given inputs.
-"""
+# Flask API blueprint — predictions, historical, simulate, backtest, forecast
 
 import os
 import sys
@@ -33,6 +14,7 @@ from backend.data.preprocessing import get_latest_features, build_features, MODE
 from backend.models.unemployment_model import predict as predict_unemployment
 from backend.models.inflation_model import predict as predict_inflation
 from backend.db.db_utils import get_engine
+from backend.data.ingestion import run_ingestion
 
 log = logging.getLogger(__name__)
 
@@ -43,24 +25,43 @@ def _err(message: str, status: int = 400):
     return jsonify({"error": message}), status
 
 
-# ---------------------------------------------------------------------------
-# GET /api/predictions
-# ---------------------------------------------------------------------------
+@api_bp.route('/refresh', methods=['POST'])
+def refresh():
+    # runs ingestion pipeline; returns how many new rows landed
+    try:
+        from sqlalchemy import text
+        engine = get_engine()
+        with engine.connect() as conn:
+            before = conn.execute(text("SELECT COUNT(*) FROM economic_data")).scalar()
+    except Exception as exc:
+        log.exception("Failed to count rows before ingestion")
+        return jsonify({"status": "error", "message": f"DB error: {exc}"}), 500
+
+    try:
+        df = run_ingestion()
+    except Exception as exc:
+        log.exception("Ingestion pipeline failed")
+        return jsonify({"status": "error", "message": f"Ingestion failed: {exc}"}), 500
+
+    try:
+        from sqlalchemy import text as _text
+        with engine.connect() as conn:
+            after = conn.execute(_text("SELECT COUNT(*) FROM economic_data")).scalar()
+        last_updated = df.index[-1].date().isoformat() if len(df) > 0 else None
+    except Exception as exc:
+        log.exception("Failed to count rows after ingestion")
+        return jsonify({"status": "error", "message": f"Post-ingestion DB error: {exc}"}), 500
+
+    return jsonify({
+        "status":       "success",
+        "last_updated": last_updated,
+        "new_records":  int(after - before),
+    })
+
 
 @api_bp.route('/predictions', methods=['GET'])
 def predictions():
-    """
-    Returns unemployment and inflation nowcasts for the most recent data point.
-
-    Response
-    --------
-    {
-        "date": "YYYY-MM-DD",
-        "unemployment_prediction": float,
-        "inflation_prediction": float,
-        "features_used": { ... }
-    }
-    """
+    # returns latest unemployment + inflation nowcast
     try:
         features = get_latest_features()
     except Exception as exc:
@@ -83,10 +84,15 @@ def predictions():
         log.exception("Inflation prediction failed")
         return _err(f"Inflation prediction failed: {exc}", 500)
 
-    # Retrieve the date of the latest feature row from the DB
     try:
         df = build_features()
         latest_date = df.index[-1].date().isoformat()
+        # diagnostic: GDP is annual World Bank data — consecutive rows are identical
+        gdp_tail = df['GDP_Growth'].dropna().tail(2)
+        log.info(
+            "GDP_Growth last 2 rows: %s",
+            gdp_tail.round(4).to_dict(),
+        )
     except Exception:
         latest_date = None
 
@@ -98,43 +104,12 @@ def predictions():
     })
 
 
-# ---------------------------------------------------------------------------
-# GET /api/historical
-# ---------------------------------------------------------------------------
-
 @api_bp.route('/historical', methods=['GET'])
 def historical():
-    """
-    Returns historical rows from the economic_data table.
-
-    Query params (all optional)
-    ---------------------------
-    start_date : YYYY-MM-DD   default: no lower bound
-    end_date   : YYYY-MM-DD   default: no upper bound
-
-    Response
-    --------
-    {
-        "count": int,
-        "data": [
-            {
-                "date": "YYYY-MM-DD",
-                "unemployment": float,
-                "inflation_cpi": float,
-                "inflation_rate": float,
-                "weekly_claims": float,
-                "personal_income": float,
-                "income_growth": float,
-                "gdp_growth": float
-            },
-            ...
-        ]
-    }
-    """
+    # returns historical rows from economic_data, optional start_date/end_date params
     start_date = request.args.get('start_date')
     end_date   = request.args.get('end_date')
 
-    # Build parameterised query
     conditions = []
     params: dict = {}
 
@@ -180,35 +155,9 @@ def historical():
     return jsonify({"count": len(data), "data": data})
 
 
-# ---------------------------------------------------------------------------
-# GET /api/simulate
-# ---------------------------------------------------------------------------
-
 @api_bp.route('/simulate', methods=['GET'])
 def simulate():
-    """
-    What-if scenario: supply raw economic inputs and get model predictions.
-
-    The route replicates the notebook's run_simulation() (Cell 12) by
-    z-scoring the raw claims and income values using the full-history
-    mean/std from the feature dataset, then calling both models.
-
-    Required query params
-    ---------------------
-    claims             : float  — raw weekly initial claims (e.g. 250000)
-    inflation          : float  — current YoY inflation rate % (e.g. 3.5)
-    income             : float  — current YoY income growth % (e.g. 2.1)
-    prev_unemployment  : float  — previous month unemployment rate % (e.g. 4.0)
-
-    Response
-    --------
-    {
-        "inputs": { ... },
-        "features": { ... },
-        "unemployment_prediction": float,
-        "inflation_prediction": float
-    }
-    """
+    # what-if scenario: supply raw inputs, get predictions back
     required = ['claims', 'inflation', 'income', 'prev_unemployment']
     missing  = [p for p in required if request.args.get(p) is None]
     if missing:
@@ -222,7 +171,6 @@ def simulate():
     except ValueError:
         return _err("All query params must be numeric")
 
-    # Z-score the raw claims and income using full-history stats
     try:
         df = build_features()
     except Exception as exc:
@@ -268,3 +216,191 @@ def simulate():
         "unemployment_prediction": round(unemp_pred, 4),
         "inflation_prediction":    round(inf_pred, 4),
     })
+
+
+@api_bp.route('/backtest', methods=['GET'])
+def backtest():
+    # runs both models over historical rows; returns actual vs predicted
+    start_date = request.args.get('start_date')
+
+    try:
+        df = build_features()
+    except Exception as exc:
+        log.exception("build_features failed in backtest")
+        return _err(f"Feature dataset error: {exc}", 500)
+
+    if start_date:
+        df = df.loc[start_date:]
+
+    results = []
+    for ts, row in df.iterrows():
+        features_dict = {feat: float(row[feat]) for feat in MODEL_FEATURES}
+
+        try:
+            unemp_pred = predict_unemployment(features_dict)
+        except FileNotFoundError as exc:
+            return _err(str(exc), 503)
+        except Exception:
+            unemp_pred = None
+
+        try:
+            inf_pred = predict_inflation(features_dict)
+        except FileNotFoundError as exc:
+            return _err(str(exc), 503)
+        except Exception:
+            inf_pred = None
+
+        import math
+        def _safe(v):
+            if v is None:
+                return None
+            try:
+                return None if math.isnan(float(v)) else round(float(v), 4)
+            except (TypeError, ValueError):
+                return None
+
+        results.append({
+            "date":                   ts.date().isoformat(),
+            "actual_unemployment":    _safe(row.get("Unemployment")),
+            "predicted_unemployment": _safe(unemp_pred),
+            "actual_inflation":       _safe(row.get("Inflation_Rate")),
+            "predicted_inflation":    _safe(inf_pred),
+        })
+
+    return jsonify({"count": len(results), "data": results})
+
+
+@api_bp.route('/forecast', methods=['GET'])
+def forecast():
+    # Prophet multi-step forecast — produces confidence intervals (yhat_lower/upper)
+    try:
+        months = int(request.args.get('months', 6))
+    except ValueError:
+        return _err("months must be an integer")
+
+    if not (1 <= months <= 24):
+        return _err("months must be between 1 and 24")
+
+    MONTH_NAMES = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ]
+
+    try:
+        import io
+        import contextlib
+        import pandas as pd
+        from prophet import Prophet
+
+        df = build_features()
+
+        # uniform month-start index required by Prophet
+        unemp_series = df['Unemployment'].dropna().copy()
+        inf_series   = df['Inflation_Rate'].dropna().copy()
+        unemp_series.index = pd.DatetimeIndex(unemp_series.index).to_period('M').to_timestamp()
+        inf_series.index   = pd.DatetimeIndex(inf_series.index).to_period('M').to_timestamp()
+
+        unemp_df = pd.DataFrame({'ds': unemp_series.index, 'y': unemp_series.values})
+        inf_df   = pd.DataFrame({'ds': inf_series.index,   'y': inf_series.values})
+
+        log.info(
+            "Unemployment last 3 actuals: %s",
+            unemp_series.tail(3).round(4).to_dict(),
+        )
+        log.info(
+            "Inflation last 3 actuals: %s",
+            inf_series.tail(4).round(4).to_dict(),
+        )
+
+        devnull = io.StringIO()
+        with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+            unemp_model = Prophet(
+                growth='linear',
+                seasonality_mode='additive',
+                changepoint_prior_scale=0.5,
+                n_changepoints=25,
+                interval_width=0.65,
+                uncertainty_samples=500,
+                yearly_seasonality=True,
+                weekly_seasonality=False,
+                daily_seasonality=False,
+            )
+            unemp_model.fit(unemp_df)
+            unemp_future = unemp_model.make_future_dataframe(periods=months, freq='MS')
+            unemp_fcst   = unemp_model.predict(unemp_future)
+
+            inf_model = Prophet(
+                growth='linear',
+                seasonality_mode='multiplicative',
+                changepoint_prior_scale=0.5,
+                n_changepoints=25,
+                interval_width=0.65,
+                uncertainty_samples=500,
+                yearly_seasonality=True,
+                weekly_seasonality=False,
+                daily_seasonality=False,
+            )
+            inf_model.add_seasonality(name='monthly', period=30.5, fourier_order=5)
+            inf_model.fit(inf_df)
+            inf_future = inf_model.make_future_dataframe(periods=months, freq='MS')
+            inf_fcst   = inf_model.predict(inf_future)
+
+        # keep only the future rows beyond the last observed date
+        unemp_fcst = unemp_fcst[unemp_fcst['ds'] > unemp_series.index[-1]].head(months).reset_index(drop=True)
+        inf_fcst   = inf_fcst[inf_fcst['ds']     > inf_series.index[-1]].head(months).reset_index(drop=True)
+
+        # shift correction — anchors forecast to the last actual if gap exceeds 0.2 pp
+        unemp_last   = float(unemp_series.iloc[-1])
+        unemp_gap    = unemp_last - float(unemp_fcst.iloc[0]['yhat'])
+        log.info("Unemployment  last_actual=%.4f  first_forecast=%.4f  gap=%.4f",
+                 unemp_last, float(unemp_fcst.iloc[0]['yhat']), unemp_gap)
+        if abs(unemp_gap) > 0.2:
+            unemp_fcst['yhat']       += unemp_gap
+            unemp_fcst['yhat_lower'] += unemp_gap
+            unemp_fcst['yhat_upper'] += unemp_gap
+            log.info("Unemployment shift applied; corrected first_forecast=%.4f",
+                     float(unemp_fcst.iloc[0]['yhat']))
+
+        inf_last  = float(inf_series.iloc[-1])
+        inf_gap   = inf_last - float(inf_fcst.iloc[0]['yhat'])
+        log.info("Inflation  last_actual=%.4f  first_forecast=%.4f  gap=%.4f",
+                 inf_last, float(inf_fcst.iloc[0]['yhat']), inf_gap)
+        if abs(inf_gap) > 0.2:
+            inf_fcst['yhat']       += inf_gap
+            inf_fcst['yhat_lower'] += inf_gap
+            inf_fcst['yhat_upper'] += inf_gap
+            log.info("Inflation shift applied; corrected first_forecast=%.4f",
+                     float(inf_fcst.iloc[0]['yhat']))
+
+        # clip to plausible ranges after any shift
+        unemp_fcst['yhat']       = unemp_fcst['yhat'].clip(lower=2.0, upper=15.0)
+        unemp_fcst['yhat_lower'] = unemp_fcst['yhat_lower'].clip(lower=2.0, upper=15.0)
+        unemp_fcst['yhat_upper'] = unemp_fcst['yhat_upper'].clip(lower=2.0, upper=15.0)
+        inf_fcst['yhat']         = inf_fcst['yhat'].clip(lower=-2.0, upper=20.0)
+        inf_fcst['yhat_lower']   = inf_fcst['yhat_lower'].clip(lower=-2.0, upper=20.0)
+        inf_fcst['yhat_upper']   = inf_fcst['yhat_upper'].clip(lower=-2.0, upper=20.0)
+
+        log.info("Unemployment final first 3: %s",
+                 unemp_fcst[['ds','yhat','yhat_lower','yhat_upper']].head(3).round(4).to_dict('records'))
+        log.info("Inflation final first 3: %s",
+                 inf_fcst[['ds','yhat','yhat_lower','yhat_upper']].head(3).round(4).to_dict('records'))
+
+    except Exception as exc:
+        log.exception("Prophet forecast failed")
+        return _err(f"Forecast failed: {exc}", 500)
+
+    results = []
+    for i in range(min(len(unemp_fcst), len(inf_fcst))):
+        ts       = unemp_fcst.iloc[i]['ds']
+        date_str = f"{MONTH_NAMES[ts.month - 1]} {ts.year}"
+        results.append({
+            "date":                         date_str,
+            "predicted_unemployment":       round(float(unemp_fcst.iloc[i]['yhat']),       4),
+            "predicted_unemployment_lower": round(float(unemp_fcst.iloc[i]['yhat_lower']), 4),
+            "predicted_unemployment_upper": round(float(unemp_fcst.iloc[i]['yhat_upper']), 4),
+            "predicted_inflation":          round(float(inf_fcst.iloc[i]['yhat']),         4),
+            "predicted_inflation_lower":    round(float(inf_fcst.iloc[i]['yhat_lower']),   4),
+            "predicted_inflation_upper":    round(float(inf_fcst.iloc[i]['yhat_upper']),   4),
+        })
+
+    return jsonify({"count": len(results), "data": results})

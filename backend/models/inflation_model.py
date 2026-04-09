@@ -1,23 +1,4 @@
-"""
-backend/models/inflation_model.py
-
-Trains an XGBoost model to nowcast the US YoY inflation rate, using the same
-feature set as the unemployment champion model (MacroMinds.ipynb Cell 15).
-
-Public API
-----------
-train()
-    Loads data, trains XGBoost targeting Inflation_Rate, prints RMSE + R²,
-    saves the model to MODEL_PATH.  Returns the fitted model.
-
-predict(features_dict)
-    Loads the saved model and returns a single inflation rate prediction.
-
-Usage
------
-    python -m backend.models.inflation_model
-    python backend/models/inflation_model.py
-"""
+# trains XGBoost to nowcast inflation rate
 
 import os
 import sys
@@ -48,22 +29,13 @@ TARGET       = 'Inflation_Rate'
 MODEL_PATH   = os.path.join(os.path.dirname(__file__), 'inflation_xgb.pkl')
 
 
-# ---------------------------------------------------------------------------
-# Data split
-# ---------------------------------------------------------------------------
-
 def _get_inflation_splits(
     cutoff_date: str,
     end_test_date: str,
 ) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]:
-    """
-    Build the full feature DataFrame and split on Inflation_Rate as the target.
-    Uses build_features() directly because preprocessing.get_training_data()
-    hardcodes Unemployment as the target.
-    """
+    # can't use get_training_data() — it hardcodes Unemployment as target
     df = build_features()
 
-    # Ensure rows with a missing Inflation_Rate are excluded
     df = df.dropna(subset=MODEL_FEATURES + [TARGET])
 
     train = df.loc[:cutoff_date]
@@ -85,19 +57,7 @@ def _get_inflation_splits(
     return X_train, y_train, X_test, y_test
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
 def train() -> xgb.XGBRegressor:
-    """
-    Full training run:
-      1. Load and split data (target = Inflation_Rate)
-      2. Train XGBoost with the same hyperparameters as the notebook (Cell 15)
-      3. Print RMSE and R²
-      4. Save the model to MODEL_PATH
-      5. Return the fitted model
-    """
     log.info("=== Inflation Model Training ===")
     log.info(f"Split: train ≤ {TRAIN_CUTOFF}  |  test {TRAIN_CUTOFF} – {TEST_END}")
 
@@ -136,26 +96,6 @@ def train() -> xgb.XGBRegressor:
 
 
 def predict(features_dict: dict) -> float:
-    """
-    Load the saved XGBoost model and return a single inflation rate prediction.
-
-    Parameters
-    ----------
-    features_dict : dict
-        Must contain the four model features (matching MODEL_FEATURES):
-          - Claims_Z_Lag1
-          - Income_Z_Lag1
-          - Inflation_Lag1
-          - Unemployment_Lag1
-
-    Returns
-    -------
-    float — predicted YoY inflation rate (%)
-
-    Raises
-    ------
-    FileNotFoundError if train() has not been run yet.
-    """
     if not os.path.exists(MODEL_PATH):
         raise FileNotFoundError(
             f"No saved model found at {MODEL_PATH}. Run train() first."
@@ -165,10 +105,6 @@ def predict(features_dict: dict) -> float:
     X = pd.DataFrame([features_dict])[MODEL_FEATURES]
     return float(model.predict(X)[0])
 
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
     train()

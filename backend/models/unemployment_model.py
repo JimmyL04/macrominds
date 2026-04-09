@@ -1,24 +1,4 @@
-"""
-backend/models/unemployment_model.py
-
-Trains an XGBoost (champion) and ARIMA (comparison baseline) model to nowcast
-the US unemployment rate, mirroring the champion model in MacroMinds.ipynb
-(Cells 9–10).
-
-Public API
-----------
-train()
-    Loads data, trains both models, prints RMSE + R², saves the best model.
-    Returns the fitted XGBoost model (always saved as the prediction model).
-
-predict(features_dict)
-    Loads the saved XGBoost model and returns a single unemployment prediction.
-
-Usage
------
-    python -m backend.models.unemployment_model
-    python backend/models/unemployment_model.py
-"""
+# trains XGBoost + ARIMA to nowcast unemployment rate
 
 import os
 import sys
@@ -51,20 +31,12 @@ TEST_END     = '2025-12-31'
 MODEL_PATH   = os.path.join(os.path.dirname(__file__), 'unemployment_xgb.pkl')
 
 
-# ---------------------------------------------------------------------------
-# Training helpers
-# ---------------------------------------------------------------------------
-
 def _train_xgboost(
     X_train: pd.DataFrame,
     y_train: pd.Series,
     X_test:  pd.DataFrame,
     y_test:  pd.Series,
 ) -> tuple[xgb.XGBRegressor, np.ndarray, float, float]:
-    """
-    XGBoost with the same hyperparameters as the champion model in the notebook
-    (Cell 9): n_estimators=1000, lr=0.05, max_depth=3, early stopping on test.
-    """
     model = xgb.XGBRegressor(
         n_estimators=1000,
         learning_rate=0.05,
@@ -88,13 +60,7 @@ def _train_arima(
     y_train: pd.Series,
     y_test:  pd.Series,
 ) -> tuple[object, np.ndarray, float, float]:
-    """
-    ARIMA(2,1,2) univariate baseline fitted on y_train; forecasts len(y_test) steps.
-    Returns (fitted_result, predictions, rmse, r2).
-    On convergence failure the function returns NaN metrics so training can
-    continue without crashing.
-    """
-    # ARIMA needs a DatetimeIndex with uniform frequency
+    # ARIMA needs a uniform-frequency DatetimeIndex
     y_tr = y_train.copy()
     y_tr.index = pd.DatetimeIndex(y_tr.index).to_period('M').to_timestamp()
 
@@ -113,22 +79,7 @@ def _train_arima(
     return result, preds, rmse, r2
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
 def train() -> xgb.XGBRegressor:
-    """
-    Full training run:
-      1. Load train/test data from preprocessing.get_training_data()
-      2. Train XGBoost (champion) and ARIMA(2,1,2) (comparison baseline)
-      3. Print RMSE and R² for both models
-      4. Save the XGBoost model to MODEL_PATH (always used for live prediction)
-      5. Return the fitted XGBoost model
-
-    The XGBoost model is always saved regardless of which model "wins" on RMSE,
-    because predict() requires feature-based inference that ARIMA cannot support.
-    """
     log.info("=== Unemployment Model Training ===")
     log.info(f"Split: train ≤ {TRAIN_CUTOFF}  |  test {TRAIN_CUTOFF} – {TEST_END}")
 
@@ -140,7 +91,6 @@ def train() -> xgb.XGBRegressor:
     log.info(f"Training ARIMA(2,1,2) on {len(y_train)} rows...")
     _, _, arima_rmse, arima_r2 = _train_arima(y_train, y_test)
 
-    # --- Results table ---
     print("\n--- Unemployment Model Results ---")
     print(f"{'Model':<22} {'RMSE':>8} {'R²':>8}")
     print("-" * 42)
@@ -156,7 +106,7 @@ def train() -> xgb.XGBRegressor:
     print(f"\nBest model: {winner}")
     print()
 
-    # --- Save XGBoost (feature-based, required for predict()) ---
+    # always save xgboost — ARIMA can't do feature-based inference at prediction time
     joblib.dump(xgb_model, MODEL_PATH)
     log.info(f"XGBoost saved → {MODEL_PATH}")
 
@@ -164,26 +114,6 @@ def train() -> xgb.XGBRegressor:
 
 
 def predict(features_dict: dict) -> float:
-    """
-    Load the saved XGBoost model and return a single unemployment prediction.
-
-    Parameters
-    ----------
-    features_dict : dict
-        Must contain the four model features (matching MODEL_FEATURES):
-          - Claims_Z_Lag1
-          - Income_Z_Lag1
-          - Inflation_Lag1
-          - Unemployment_Lag1
-
-    Returns
-    -------
-    float — predicted unemployment rate (%)
-
-    Raises
-    ------
-    FileNotFoundError if train() has not been run yet.
-    """
     if not os.path.exists(MODEL_PATH):
         raise FileNotFoundError(
             f"No saved model found at {MODEL_PATH}. Run train() first."
@@ -193,10 +123,6 @@ def predict(features_dict: dict) -> float:
     X = pd.DataFrame([features_dict])[MODEL_FEATURES]
     return float(model.predict(X)[0])
 
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
     train()
