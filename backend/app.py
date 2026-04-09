@@ -42,9 +42,21 @@ def initialize_if_empty() -> dict:
     with engine.connect() as conn:
         count = conn.execute(text("SELECT COUNT(*) FROM economic_data")).scalar()
 
+    from backend.models.unemployment_model import MODEL_PATH as UNEMP_PKL
+    from backend.models.inflation_model import MODEL_PATH as INF_PKL
+
     if count and count > 0:
-        log.info(f"Database has {count} rows — skipping initialization")
-        return {"status": "skipped", "rows": count}
+        models_exist = os.path.exists(UNEMP_PKL) and os.path.exists(INF_PKL)
+        if models_exist:
+            log.info(f"Database has {count} rows and models exist — skipping initialization")
+            return {"status": "skipped", "rows": count}
+        log.info(f"Database has {count} rows but .pkl files are missing — training models...")
+        from backend.models.unemployment_model import train as train_unemployment
+        from backend.models.inflation_model import train as train_inflation
+        train_unemployment()
+        train_inflation()
+        log.info("Model training complete")
+        return {"status": "trained", "rows": count}
 
     log.info("Database is empty — running initialization (this will take a minute)...")
 

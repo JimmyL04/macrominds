@@ -59,6 +59,19 @@ def refresh():
     })
 
 
+@api_bp.route('/train', methods=['POST'])
+def train_models():
+    try:
+        from backend.models.unemployment_model import train as train_unemployment
+        from backend.models.inflation_model import train as train_inflation
+        train_unemployment()
+        train_inflation()
+        return jsonify({"status": "success", "message": "Models trained successfully"})
+    except Exception as exc:
+        log.exception("Model training failed")
+        return _err(f"Training failed: {exc}", 500)
+
+
 @api_bp.route('/predictions', methods=['GET'])
 def predictions():
     # returns latest unemployment + inflation nowcast
