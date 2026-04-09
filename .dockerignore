@@ -1,8 +1,10 @@
-__pycache__/
+node_modules
+frontend/node_modules
+.env
+*.env
+__pycache__
 *.pyc
 *.pyo
-.env
 .git
-frontend/
-node_modules/
+.vite
 *.pkl
