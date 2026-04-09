@@ -59,6 +59,28 @@ def refresh():
     })
 
 
+@api_bp.route('/migrate', methods=['POST'])
+def migrate():
+    """Run the full schema.sql against the database — creates any missing tables."""
+    import os
+    from sqlalchemy import text
+    try:
+        schema_path = os.path.join(os.path.dirname(__file__), '..', 'db', 'schema.sql')
+        with open(schema_path) as f:
+            schema_sql = f.read()
+        engine = get_engine()
+        with engine.begin() as conn:
+            for stmt in schema_sql.split(';'):
+                stmt = stmt.strip()
+                if stmt:
+                    conn.execute(text(stmt))
+        log.info("Migration complete")
+        return jsonify({"status": "success", "message": "Schema applied successfully"})
+    except Exception as exc:
+        log.exception("Migration failed")
+        return _err(f"Migration failed: {exc}", 500)
+
+
 @api_bp.route('/train', methods=['POST'])
 def train_models():
     try:
