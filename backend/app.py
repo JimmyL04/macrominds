@@ -123,10 +123,6 @@ def create_app() -> Flask:
     def health():
         return jsonify({"status": "ok"})
 
-    @app.route('/api/cors-test', methods=['GET'])
-    def cors_test():
-        return jsonify({"status": "ok", "origin_allowed": True})
-
     @app.route('/api/init', methods=['POST'])
     def init():
         try:
@@ -135,17 +131,6 @@ def create_app() -> Flask:
         except Exception as exc:
             log.exception("Initialization failed")
             return jsonify({"status": "error", "message": str(exc)}), 500
-
-    @app.route('/debug')
-    def debug():
-        dist_exists = os.path.exists(_frontend_dist)
-        return jsonify({
-            'cwd': os.getcwd(),
-            'app_files': os.listdir('/app') if os.path.exists('/app') else [],
-            'frontend_dist_path': _frontend_dist,
-            'frontend_dist_exists': dist_exists,
-            'frontend_dist_files': os.listdir(_frontend_dist) if dist_exists else [],
-        })
 
     @app.route('/', defaults={'path': ''})
     @app.route('/<path:path>')

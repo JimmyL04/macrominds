@@ -3,7 +3,6 @@
 const BASE_URL = typeof window !== 'undefined' && window.location.hostname !== 'localhost'
   ? ''
   : 'http://localhost:5001';
-console.log("Fetching from:", BASE_URL || '(relative)');
 
 export interface PredictionsResponse {
   date: string | null;
