@@ -45,7 +45,8 @@ export default function App() {
   const highlightTimerRef                   = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [showHowToUse, setShowHowToUse]     = useState(false);
 
-  // fetch all data in parallel on mount
+  // fetch all data in parallel on mount — fetchApiRefresh is NOT called here,
+  // only when the user explicitly clicks "Refresh Data"
   useEffect(() => {
     async function load() {
       try {
