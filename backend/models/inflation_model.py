@@ -97,9 +97,8 @@ def train() -> xgb.XGBRegressor:
 
 def predict(features_dict: dict) -> float:
     if not os.path.exists(MODEL_PATH):
-        raise FileNotFoundError(
-            f"No saved model found at {MODEL_PATH}. Run train() first."
-        )
+        log.info("inflation_xgb.pkl not found — training now...")
+        train()
 
     model = joblib.load(MODEL_PATH)
     X = pd.DataFrame([features_dict])[MODEL_FEATURES]
