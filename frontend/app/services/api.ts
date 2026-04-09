@@ -1,6 +1,7 @@
 // typed fetch wrappers for the Flask backend
 
-const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:5001";
+const BASE_URL = import.meta.env.VITE_API_URL
+  || "https://macrominds-production.up.railway.app";
 
 export interface PredictionsResponse {
   date: string | null;
