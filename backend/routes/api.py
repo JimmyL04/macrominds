@@ -349,41 +349,75 @@ def forecast():
         )
 
         devnull = io.StringIO()
-        with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
-            unemp_model = Prophet(
-                growth='linear',
-                seasonality_mode='additive',
-                changepoint_prior_scale=0.5,
-                n_changepoints=25,
-                interval_width=0.65,
-                uncertainty_samples=500,
-                yearly_seasonality=True,
-                weekly_seasonality=False,
-                daily_seasonality=False,
-            )
-            unemp_model.fit(unemp_df)
-            unemp_future = unemp_model.make_future_dataframe(periods=months, freq='MS')
-            unemp_fcst   = unemp_model.predict(unemp_future)
+        try:
+            with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+                unemp_model = Prophet(
+                    growth='linear',
+                    seasonality_mode='additive',
+                    changepoint_prior_scale=0.5,
+                    n_changepoints=25,
+                    interval_width=0.65,
+                    uncertainty_samples=500,
+                    yearly_seasonality=True,
+                    weekly_seasonality=False,
+                    daily_seasonality=False,
+                )
+                unemp_model.fit(unemp_df)
+                unemp_future = unemp_model.make_future_dataframe(periods=months, freq='MS')
+                unemp_fcst   = unemp_model.predict(unemp_future)
 
-            inf_model = Prophet(
-                growth='linear',
-                seasonality_mode='multiplicative',
-                changepoint_prior_scale=0.5,
-                n_changepoints=25,
-                interval_width=0.65,
-                uncertainty_samples=500,
-                yearly_seasonality=True,
-                weekly_seasonality=False,
-                daily_seasonality=False,
-            )
-            inf_model.add_seasonality(name='monthly', period=30.5, fourier_order=5)
-            inf_model.fit(inf_df)
-            inf_future = inf_model.make_future_dataframe(periods=months, freq='MS')
-            inf_fcst   = inf_model.predict(inf_future)
+                inf_model = Prophet(
+                    growth='linear',
+                    seasonality_mode='multiplicative',
+                    changepoint_prior_scale=0.5,
+                    n_changepoints=25,
+                    interval_width=0.65,
+                    uncertainty_samples=500,
+                    yearly_seasonality=True,
+                    weekly_seasonality=False,
+                    daily_seasonality=False,
+                )
+                inf_model.add_seasonality(name='monthly', period=30.5, fourier_order=5)
+                inf_model.fit(inf_df)
+                inf_future = inf_model.make_future_dataframe(periods=months, freq='MS')
+                inf_fcst   = inf_model.predict(inf_future)
 
-        # keep only the future rows beyond the last observed date
-        unemp_fcst = unemp_fcst[unemp_fcst['ds'] > unemp_series.index[-1]].head(months).reset_index(drop=True)
-        inf_fcst   = inf_fcst[inf_fcst['ds']     > inf_series.index[-1]].head(months).reset_index(drop=True)
+            # keep only the future rows beyond the last observed date
+            unemp_fcst = unemp_fcst[unemp_fcst['ds'] > unemp_series.index[-1]].head(months).reset_index(drop=True)
+            inf_fcst   = inf_fcst[inf_fcst['ds']     > inf_series.index[-1]].head(months).reset_index(drop=True)
+
+        except Exception as prophet_exc:
+            log.warning("Prophet failed (%s) — falling back to ARIMA", prophet_exc)
+            from statsmodels.tsa.arima.model import ARIMA
+
+            future_unemp = pd.date_range(
+                start=unemp_series.index[-1] + pd.DateOffset(months=1),
+                periods=months,
+                freq='MS',
+            )
+            future_inf = pd.date_range(
+                start=inf_series.index[-1] + pd.DateOffset(months=1),
+                periods=months,
+                freq='MS',
+            )
+
+            u_res = ARIMA(unemp_series.values, order=(2, 1, 2)).fit().get_forecast(months)
+            u_ci  = u_res.conf_int(alpha=0.35)
+            unemp_fcst = pd.DataFrame({
+                'ds':         future_unemp,
+                'yhat':       u_res.predicted_mean,
+                'yhat_lower': u_ci.iloc[:, 0].values,
+                'yhat_upper': u_ci.iloc[:, 1].values,
+            })
+
+            i_res = ARIMA(inf_series.values, order=(2, 1, 2)).fit().get_forecast(months)
+            i_ci  = i_res.conf_int(alpha=0.35)
+            inf_fcst = pd.DataFrame({
+                'ds':         future_inf,
+                'yhat':       i_res.predicted_mean,
+                'yhat_lower': i_ci.iloc[:, 0].values,
+                'yhat_upper': i_ci.iloc[:, 1].values,
+            })
 
         # shift correction — anchors forecast to the last actual if gap exceeds 0.2 pp
         unemp_last   = float(unemp_series.iloc[-1])
