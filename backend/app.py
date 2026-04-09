@@ -84,7 +84,7 @@ def is_allowed_origin(origin: str) -> bool:
     return any(re.match(pattern, origin) for pattern in _ALLOWED_ORIGINS)
 
 
-_frontend_dist = os.path.join(os.path.dirname(__file__), '..', 'frontend', 'dist')
+_frontend_dist = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'frontend', 'dist')
 
 
 def create_app() -> Flask:
@@ -136,12 +136,38 @@ def create_app() -> Flask:
             log.exception("Initialization failed")
             return jsonify({"status": "error", "message": str(exc)}), 500
 
+    @app.route('/debug')
+    def debug():
+        dist_exists = os.path.exists(_frontend_dist)
+        return jsonify({
+            'cwd': os.getcwd(),
+            'app_files': os.listdir('/app') if os.path.exists('/app') else [],
+            'frontend_dist_path': _frontend_dist,
+            'frontend_dist_exists': dist_exists,
+            'frontend_dist_files': os.listdir(_frontend_dist) if dist_exists else [],
+        })
+
     @app.route('/', defaults={'path': ''})
     @app.route('/<path:path>')
     def serve_frontend(path):
-        if path and os.path.exists(os.path.join(_frontend_dist, path)):
+        if path.startswith('api/'):
+            return jsonify({'error': 'Not found'}), 404
+
+        file_path = os.path.join(_frontend_dist, path)
+        if path and os.path.exists(file_path):
             return send_from_directory(_frontend_dist, path)
-        return send_from_directory(_frontend_dist, 'index.html')
+
+        index_path = os.path.join(_frontend_dist, 'index.html')
+        if os.path.exists(index_path):
+            return send_from_directory(_frontend_dist, 'index.html')
+
+        return jsonify({
+            'error': 'Frontend not found',
+            'looking_for': _frontend_dist,
+            'exists': os.path.exists(_frontend_dist),
+            'cwd': os.getcwd(),
+            'files': os.listdir('/app') if os.path.exists('/app') else [],
+        }), 404
 
     log.info("Registered routes:")
     with app.app_context():
