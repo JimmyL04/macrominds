@@ -4,7 +4,7 @@ import os
 import sys
 import logging
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 
 _root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -49,7 +49,7 @@ def initialize_if_empty() -> dict:
         if models_exist:
             log.info(f"Database has {count} rows and models exist — skipping initialization")
             return {"status": "skipped", "rows": count}
-        log.info(f"Database has {count} rows but .pkl files are missing — training models...")
+        log.info(f"Database has {count} rows but models are missing — training...")
         from backend.models.unemployment_model import train as train_unemployment
         from backend.models.inflation_model import train as train_inflation
         train_unemployment()
@@ -74,17 +74,36 @@ def initialize_if_empty() -> dict:
 def create_app() -> Flask:
     app = Flask(__name__)
 
-    CORS(app, origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "https://macrominds-production.up.railway.app",
-    ])
+    CORS(app, resources={r"/api/*": {
+        "origins": [
+            "http://localhost:5173",
+            "http://localhost:3000",
+            "https://macrominds.vercel.app",
+            "https://macrominds-git-main-jimmyl04s-projects.vercel.app",
+            "https://macrominds-hckxrvimi-jimmyl04s-projects.vercel.app",
+        ],
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization"],
+    }})
 
     app.register_blueprint(api_bp)
+
+    @app.before_request
+    def log_request():
+        log.info(
+            "%s %s  origin=%s",
+            request.method,
+            request.path,
+            request.headers.get("Origin", "-"),
+        )
 
     @app.route('/health')
     def health():
         return jsonify({"status": "ok"})
+
+    @app.route('/api/cors-test', methods=['GET'])
+    def cors_test():
+        return jsonify({"status": "ok", "origin_allowed": True})
 
     @app.route('/api/init', methods=['POST'])
     def init():
@@ -106,7 +125,7 @@ def create_app() -> Flask:
 if __name__ == '__main__':
     app = create_app()
     app.run(
-        host=os.getenv('FLASK_HOST', '0.0.0.0'),
-        port=int(os.getenv('FLASK_PORT', 5001)),
-        debug=os.getenv('FLASK_DEBUG', 'true').lower() == 'true',
+        host='0.0.0.0',
+        port=int(os.environ.get('PORT', os.getenv('FLASK_PORT', 5001))),
+        debug=os.getenv('FLASK_DEBUG', 'false').lower() == 'true',
     )
