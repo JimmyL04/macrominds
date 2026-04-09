@@ -25,7 +25,11 @@ def create_app() -> Flask:
     app = Flask(__name__)
 
     # allow vite dev server to call the api
-    CORS(app, origins=["http://localhost:5173", "http://127.0.0.1:5173"])
+    CORS(app, origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "https://macrominds-production.up.railway.app",
+    ])
 
     app.register_blueprint(api_bp)
 
