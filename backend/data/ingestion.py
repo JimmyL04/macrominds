@@ -205,7 +205,7 @@ def _to_float_or_none(val) -> float | None:
 
 
 def write_to_db(df: pd.DataFrame, source: str = "FRED") -> int:
-    from sqlalchemy import MetaData
+    from sqlalchemy import MetaData, func
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
     rows = []
@@ -226,11 +226,19 @@ def write_to_db(df: pd.DataFrame, source: str = "FRED") -> int:
         table = meta.tables["economic_data"]
 
         stmt = pg_insert(table).values(rows)
-        update_cols = {
-            c.name: stmt.excluded[c.name]
-            for c in table.c
-            if c.name not in ("id", "date", "source", "created_at")
-        }
+
+        update_cols = {}
+        for c in table.c:
+            if c.name in ("id", "date", "source", "created_at"):
+                continue
+            if c.name == "gdp_growth":
+                # Never clobber an existing GDP value with NULL.
+                # If the incoming value is non-NULL use it (handles real revisions);
+                # if it's NULL fall back to whatever is already in the DB.
+                update_cols[c.name] = func.coalesce(stmt.excluded[c.name], c)
+            else:
+                update_cols[c.name] = stmt.excluded[c.name]
+
         stmt = stmt.on_conflict_do_update(
             index_elements=["date", "source"],
             set_=update_cols,
