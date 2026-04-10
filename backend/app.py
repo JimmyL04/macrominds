@@ -21,6 +21,43 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
+def _heal_gdp_if_stale() -> bool:
+    """
+    Check whether gdp_growth looks stale (all same value = World Bank annual data).
+    If fewer than 10 distinct GDP values exist in the last 3 years, fetch
+    FRED A191RL1Q225SBEA and overwrite only the gdp_growth column.
+    Returns True if a fix was applied.
+    """
+    try:
+        from sqlalchemy import text
+        from backend.db.db_utils import get_engine
+        engine = get_engine()
+        with engine.connect() as conn:
+            distinct = conn.execute(text(
+                "SELECT COUNT(DISTINCT ROUND(gdp_growth::numeric, 4)) "
+                "FROM economic_data "
+                "WHERE gdp_growth IS NOT NULL AND date >= NOW() - INTERVAL '3 years'"
+            )).scalar() or 0
+        log.info("GDP distinct values (last 3 years): %d", distinct)
+        if distinct >= 10:
+            return False          # data looks healthy
+
+        log.warning(
+            "GDP appears stale (%d distinct values) — fetching FRED quarterly data to fix",
+            distinct,
+        )
+        from fredapi import Fred
+        from backend.data.ingestion import _upsert_gdp_only
+        fred = Fred(api_key=os.getenv('FRED_API_KEY'))
+        gdp_q = fred.get_series('A191RL1Q225SBEA').dropna()
+        updated = _upsert_gdp_only(gdp_q)
+        log.info("GDP self-heal complete: %d rows updated", updated)
+        return True
+    except Exception as exc:
+        log.warning("GDP self-heal failed (non-fatal): %s", exc)
+        return False
+
+
 def initialize_if_empty() -> dict:
     """Create schema and seed data if the DB is empty. Returns a status dict."""
     from sqlalchemy import text
@@ -45,6 +82,11 @@ def initialize_if_empty() -> dict:
     from backend.db.model_storage import model_exists
 
     if count and count > 0:
+        # Always check GDP quality, even when the rest of the DB looks fine.
+        # This fixes the case where the DB was seeded with World Bank annual
+        # data and never received the FRED quarterly migration.
+        _heal_gdp_if_stale()
+
         models_exist = model_exists('unemployment_xgb') and model_exists('inflation_xgb')
         if models_exist:
             log.info(f"Database has {count} rows and models exist — skipping initialization")
@@ -164,6 +206,12 @@ def create_app() -> Flask:
 
 if __name__ == '__main__':
     app = create_app()
+
+    # Self-heal GDP on every startup so stale World Bank data is fixed
+    # automatically on the next Railway deploy without any manual curl.
+    import threading
+    threading.Thread(target=_heal_gdp_if_stale, daemon=True).start()
+
     app.run(
         host='0.0.0.0',
         port=int(os.environ.get('PORT', 5001)),
