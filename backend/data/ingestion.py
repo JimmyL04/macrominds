@@ -249,6 +249,33 @@ def write_to_db(df: pd.DataFrame, source: str = "FRED") -> int:
     return len(rows)
 
 
+def _upsert_gdp_only(gdp_monthly: pd.Series) -> int:
+    """
+    UPDATE economic_data SET gdp_growth = <value> WHERE date = <date>.
+
+    Uses a plain UPDATE (not an upsert) so it ONLY touches the gdp_growth
+    column and never modifies unemployment, inflation, or any other column.
+    This is the authoritative GDP write path; the main write_to_db upsert
+    is a secondary/fallback for newly-inserted rows.
+    """
+    from sqlalchemy import text
+    engine = get_engine()
+    updated = 0
+    # forward-fill so months 2-3 of each quarter get the quarter's value
+    gdp_filled = gdp_monthly.resample('MS').ffill()
+    with engine.begin() as conn:
+        for date, val in gdp_filled.items():
+            if pd.isna(val):
+                continue
+            result = conn.execute(
+                text("UPDATE economic_data SET gdp_growth = :v WHERE date = :d"),
+                {"v": float(val), "d": date.date()},
+            )
+            updated += result.rowcount
+    log.info("GDP-only UPDATE: %d rows updated", updated)
+    return updated
+
+
 def run_ingestion() -> pd.DataFrame:
     log.info("========== MacroMinds Data Ingestion ==========")
 
@@ -278,6 +305,13 @@ def run_ingestion() -> pd.DataFrame:
     log.info("--- Writing to PostgreSQL ---")
     n = write_to_db(df)
 
+    # Dedicated GDP UPDATE — runs after the main upsert so it always wins.
+    # This overwrites any stale value (World Bank annual, etc.) with the
+    # correct FRED quarterly figure, touching ONLY the gdp_growth column.
+    if not df_gdp.empty:
+        log.info("--- Updating GDP-only (targeted UPDATE) ---")
+        _upsert_gdp_only(df_gdp["GDP_Growth"])
+
     log.info(f"========== Ingestion complete: {n} rows written ==========")
 
     # Diagnostic: verify GDP has real variation in the DB
@@ -293,6 +327,9 @@ def run_ingestion() -> pd.DataFrame:
         log.info("Last 8 GDP rows in DB (newest first):")
         for r in gdp_rows:
             log.info("  %s  →  %.4f", r[0], r[1])
+        distinct = len(set(r[1] for r in gdp_rows))
+        if distinct < 3:
+            log.warning("GDP still looks flat — only %d distinct values in last 8 rows", distinct)
     except Exception as exc:
         log.warning("GDP diagnostic query failed: %s", exc)
 
