@@ -129,17 +129,31 @@ def fetch_fred_gdp_data() -> pd.DataFrame:
     fred = Fred(api_key=api_key)
     log.info("  FRED  A191RL1Q225SBEA  (Real GDP % change, quarterly SAAR)")
 
-    gdp_quarterly = fred.get_series('A191RL1Q225SBEA')
+    gdp_quarterly = fred.get_series('A191RL1Q225SBEA').dropna()
+
+    log.info(
+        "GDP quarterly raw: %d quarters  [%s → %s]  last 4: %s",
+        len(gdp_quarterly),
+        gdp_quarterly.index[0].date(),
+        gdp_quarterly.index[-1].date(),
+        gdp_quarterly.tail(4).round(2).to_dict(),
+    )
 
     # quarterly dates from FRED are already quarter-start (Jan 1, Apr 1, Jul 1, Oct 1)
     # resample to monthly and ffill so all 3 months of a quarter share the same value
     gdp_monthly = gdp_quarterly.resample('MS').ffill()
     gdp_df = gdp_monthly.to_frame(name='GDP_Growth')
 
+    distinct = gdp_df['GDP_Growth'].nunique()
     log.info(
-        f"FRED GDP data ready: {len(gdp_df)} rows  "
-        f"[{gdp_df.index[0].date()} → {gdp_df.index[-1].date()}]"
+        "FRED GDP monthly: %d rows  [%s → %s]  distinct values: %d",
+        len(gdp_df),
+        gdp_df.index[0].date(),
+        gdp_df.index[-1].date(),
+        distinct,
     )
+    if distinct < 5:
+        log.warning("GDP has very few distinct values (%d) — data may be stale", distinct)
     return gdp_df
 
 
@@ -257,6 +271,23 @@ def run_ingestion() -> pd.DataFrame:
     n = write_to_db(df)
 
     log.info(f"========== Ingestion complete: {n} rows written ==========")
+
+    # Diagnostic: verify GDP has real variation in the DB
+    try:
+        from sqlalchemy import text
+        engine = get_engine()
+        with engine.connect() as conn:
+            gdp_rows = conn.execute(text(
+                "SELECT date, gdp_growth FROM economic_data "
+                "WHERE gdp_growth IS NOT NULL "
+                "ORDER BY date DESC LIMIT 8"
+            )).fetchall()
+        log.info("Last 8 GDP rows in DB (newest first):")
+        for r in gdp_rows:
+            log.info("  %s  →  %.4f", r[0], r[1])
+    except Exception as exc:
+        log.warning("GDP diagnostic query failed: %s", exc)
+
     return df
 
 

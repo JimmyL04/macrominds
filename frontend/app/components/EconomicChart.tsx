@@ -128,6 +128,18 @@ export function EconomicChart({
       };
     });
 
+    // Forward-fill gdpGrowth across monthly rows so the GDP line is continuous.
+    // GDP is quarterly; months 2–3 of each quarter may be null if the DB or API
+    // hasn't filled them yet.
+    let lastGdp: number | null = null;
+    for (const row of historicalRows) {
+      if (row.gdpGrowth != null) {
+        lastGdp = row.gdpGrowth;
+      } else if (lastGdp != null) {
+        row.gdpGrowth = lastGdp;
+      }
+    }
+
     const nowLabel = historicalRows.length > 0
       ? historicalRows[historicalRows.length - 1].date
       : null;
@@ -451,13 +463,14 @@ export function EconomicChart({
       const metric = metricOptions.find((m) => m.value === metricKey);
       if (!metric) return;
 
+      // GDP is quarterly — connect across any remaining nulls so the line doesn't break
       const solidProps = {
         key:          metricKey,
         dataKey:      metricKey,
         stroke:       metric.color,
         fill:         metric.color,
         name:         metric.label,
-        connectNulls: false,
+        connectNulls: metricKey === "gdpGrowth",
       };
 
       // connectNulls: true so the pred line bridges backtest → "Now" → forecast

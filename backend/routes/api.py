@@ -194,6 +194,17 @@ def historical():
         for r in rows
     ]
 
+    # Forward-fill gdp_growth so every monthly row has a value.
+    # GDP is quarterly (FRED A191RL1Q225SBEA), so months 2 and 3 of each
+    # quarter may be NULL in the DB. Propagate the most recent quarter's
+    # value forward so the chart line is continuous.
+    last_gdp = None
+    for row in data:
+        if row["gdp_growth"] is not None:
+            last_gdp = row["gdp_growth"]
+        elif last_gdp is not None:
+            row["gdp_growth"] = last_gdp
+
     return jsonify({"count": len(data), "data": data})
 
 
