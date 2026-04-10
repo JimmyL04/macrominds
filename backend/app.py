@@ -39,7 +39,7 @@ def _heal_gdp_if_stale() -> bool:
                 "WHERE gdp_growth IS NOT NULL AND date >= NOW() - INTERVAL '3 years'"
             )).scalar() or 0
         log.info("GDP distinct values (last 3 years): %d", distinct)
-        if distinct >= 10:
+        if distinct >= 4:
             return False          # data looks healthy
 
         log.warning(
@@ -49,7 +49,7 @@ def _heal_gdp_if_stale() -> bool:
         from fredapi import Fred
         from backend.data.ingestion import _upsert_gdp_only
         fred = Fred(api_key=os.getenv('FRED_API_KEY'))
-        gdp_q = fred.get_series('A191RL1Q225SBEA').dropna()
+        gdp_q = fred.get_series('A191RO1Q156NBEA').dropna()
         updated = _upsert_gdp_only(gdp_q)
         log.info("GDP self-heal complete: %d rows updated", updated)
         return True

@@ -127,9 +127,9 @@ def fetch_fred_gdp_data() -> pd.DataFrame:
         return pd.DataFrame()
 
     fred = Fred(api_key=api_key)
-    log.info("  FRED  A191RL1Q225SBEA  (Real GDP % change, quarterly SAAR)")
+    log.info("  FRED  A191RO1Q156NBEA  (Real GDP % change from year ago, quarterly)")
 
-    gdp_quarterly = fred.get_series('A191RL1Q225SBEA').dropna()
+    gdp_quarterly = fred.get_series('A191RO1Q156NBEA').dropna()
 
     log.info(
         "GDP quarterly raw: %d quarters  [%s → %s]  last 4: %s",
@@ -328,7 +328,7 @@ def run_ingestion() -> pd.DataFrame:
         for r in gdp_rows:
             log.info("  %s  →  %.4f", r[0], r[1])
         distinct = len(set(r[1] for r in gdp_rows))
-        if distinct < 3:
+        if distinct < 2:
             log.warning("GDP still looks flat — only %d distinct values in last 8 rows", distinct)
     except Exception as exc:
         log.warning("GDP diagnostic query failed: %s", exc)
