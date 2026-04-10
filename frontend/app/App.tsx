@@ -296,6 +296,9 @@ export default function App() {
             unempPredicted={predictions?.unemployment_prediction ?? null}
             inflationCurrent={latestRow?.inflation ?? null}
             inflationPredicted={predictions?.inflation_prediction ?? null}
+            gdpCurrent={latestRow?.gdpGrowth ?? null}
+            gdpPredicted={predictions?.gdp_prediction ?? null}
+            gdpQuarter={predictions?.gdp_quarter ?? null}
             forecastData={forecastData}
             forecastMonths={forecastMonths}
             historicalData={historicalData}

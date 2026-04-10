@@ -8,6 +8,8 @@ export interface PredictionsResponse {
   date: string | null;
   unemployment_prediction: number;
   inflation_prediction: number;
+  gdp_prediction?: number | null;
+  gdp_quarter?: string | null;
   features_used: Record<string, number>;
 }
 
@@ -55,6 +57,9 @@ export interface ForecastPoint {
   predicted_inflation: number;
   predicted_inflation_lower: number;
   predicted_inflation_upper: number;
+  predicted_gdp: number | null;
+  predicted_gdp_lower: number | null;
+  predicted_gdp_upper: number | null;
 }
 
 export interface TimeSeriesDataPoint {
@@ -78,7 +83,7 @@ export interface EconomicMetric {
 export const metricOptions = [
   { value: "unemployment", label: "Unemployment Rate", color: "#ef4444", predKey: "unemployment_pred" as string | null },
   { value: "inflation",    label: "Inflation Rate",    color: "#f59e0b", predKey: "inflation_pred"    as string | null },
-  { value: "gdpGrowth",   label: "GDP Growth",        color: "#10b981", predKey: null },
+  { value: "gdpGrowth",   label: "GDP Growth",        color: "#10b981", predKey: "gdp_pred" as string | null },
 ];
 
 export const chartTypeOptions = [

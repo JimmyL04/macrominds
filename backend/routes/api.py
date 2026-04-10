@@ -86,8 +86,10 @@ def train_models():
     try:
         from backend.models.unemployment_model import train as train_unemployment
         from backend.models.inflation_model import train as train_inflation
+        from backend.models.gdp_model import train as train_gdp
         train_unemployment()
         train_inflation()
+        train_gdp()
         return jsonify({"status": "success", "message": "Models trained successfully"})
     except Exception as exc:
         log.exception("Model training failed")
@@ -119,23 +121,28 @@ def predictions():
         log.exception("Inflation prediction failed")
         return _err(f"Inflation prediction failed: {exc}", 500)
 
+    gdp_pred    = None
+    gdp_quarter = None
+    try:
+        from backend.models.gdp_model import nowcast_gdp
+        gdp_pred, gdp_quarter = nowcast_gdp()
+        gdp_pred = round(gdp_pred, 4)
+    except Exception as exc:
+        log.warning("GDP nowcast failed: %s", exc)
+
     try:
         df = build_features()
         latest_date = df.index[-1].date().isoformat()
-        # diagnostic: GDP is annual World Bank data — consecutive rows are identical
-        gdp_tail = df['GDP_Growth'].dropna().tail(2)
-        log.info(
-            "GDP_Growth last 2 rows: %s",
-            gdp_tail.round(4).to_dict(),
-        )
     except Exception:
         latest_date = None
 
     return jsonify({
-        "date": latest_date,
+        "date":                    latest_date,
         "unemployment_prediction": round(unemp_pred, 4),
-        "inflation_prediction": round(inf_pred, 4),
-        "features_used": {k: round(v, 6) for k, v in features.items()},
+        "inflation_prediction":    round(inf_pred, 4),
+        "gdp_prediction":          gdp_pred,
+        "gdp_quarter":             gdp_quarter,
+        "features_used":           {k: round(v, 6) for k, v in features.items()},
     })
 
 
@@ -459,10 +466,28 @@ def forecast():
         log.exception("Prophet forecast failed")
         return _err(f"Forecast failed: {exc}", 500)
 
+    # GDP quarterly forecast — keyed by (year, quarter_start_month)
+    gdp_by_month: dict = {}
+    try:
+        from backend.models.gdp_model import forecast_gdp
+        gdp_fcst = forecast_gdp(months)
+        for _, row in gdp_fcst.iterrows():
+            key = (row['ds'].year, row['ds'].month)
+            gdp_by_month[key] = row
+        log.info("GDP forecast: %d quarters", len(gdp_by_month))
+    except Exception as exc:
+        log.warning("GDP forecast failed (non-fatal): %s", exc)
+
     results = []
     for i in range(min(len(unemp_fcst), len(inf_fcst))):
         ts       = unemp_fcst.iloc[i]['ds']
         date_str = f"{MONTH_NAMES[ts.month - 1]} {ts.year}"
+
+        gdp_row = gdp_by_month.get((ts.year, ts.month))
+        predicted_gdp       = round(float(gdp_row['yhat']),       4) if gdp_row is not None else None
+        predicted_gdp_lower = round(float(gdp_row['yhat_lower']), 4) if gdp_row is not None else None
+        predicted_gdp_upper = round(float(gdp_row['yhat_upper']), 4) if gdp_row is not None else None
+
         results.append({
             "date":                         date_str,
             "predicted_unemployment":       round(float(unemp_fcst.iloc[i]['yhat']),       4),
@@ -471,6 +496,9 @@ def forecast():
             "predicted_inflation":          round(float(inf_fcst.iloc[i]['yhat']),         4),
             "predicted_inflation_lower":    round(float(inf_fcst.iloc[i]['yhat_lower']),   4),
             "predicted_inflation_upper":    round(float(inf_fcst.iloc[i]['yhat_upper']),   4),
+            "predicted_gdp":                predicted_gdp,
+            "predicted_gdp_lower":          predicted_gdp_lower,
+            "predicted_gdp_upper":          predicted_gdp_upper,
         })
 
     return jsonify({"count": len(results), "data": results})

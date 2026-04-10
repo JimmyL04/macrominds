@@ -12,6 +12,9 @@ interface AIPredictionsProps {
   unempPredicted: number | null;
   inflationCurrent: number | null;
   inflationPredicted: number | null;
+  gdpCurrent: number | null;
+  gdpPredicted: number | null;
+  gdpQuarter: string | null;
   forecastData: ForecastPoint[];
   forecastMonths: number;
   historicalData: TimeSeriesDataPoint[];
@@ -35,6 +38,8 @@ interface LookupResult {
   unemployment_upper?: number | null;
   inflation_lower?: number | null;
   inflation_upper?: number | null;
+  gdp_lower?: number | null;
+  gdp_upper?: number | null;
 }
 
 function InfoTooltip({ text }: { text: string }) {
@@ -67,6 +72,9 @@ export function AIPredictions({
   unempPredicted,
   inflationCurrent,
   inflationPredicted,
+  gdpCurrent,
+  gdpPredicted,
+  gdpQuarter,
   forecastData,
   forecastMonths,
   historicalData,
@@ -135,11 +143,13 @@ export function AIPredictions({
         type:               "forecast",
         unemployment:       forecastMatch.predicted_unemployment,
         inflation:          forecastMatch.predicted_inflation,
-        gdpGrowth:          null,
+        gdpGrowth:          forecastMatch.predicted_gdp ?? null,
         unemployment_lower: forecastMatch.predicted_unemployment_lower,
         unemployment_upper: forecastMatch.predicted_unemployment_upper,
         inflation_lower:    forecastMatch.predicted_inflation_lower,
         inflation_upper:    forecastMatch.predicted_inflation_upper,
+        gdp_lower:          forecastMatch.predicted_gdp_lower ?? null,
+        gdp_upper:          forecastMatch.predicted_gdp_upper ?? null,
       });
       onDateLookup(normalized);
       return;
@@ -172,7 +182,7 @@ export function AIPredictions({
 
       {loading ? (
         <div className="space-y-4">
-          {[1, 2].map((i) => (
+          {[1, 2, 3].map((i) => (
             <div
               key={i}
               className="p-4 bg-gray-50 rounded-lg border border-gray-200 animate-pulse"
@@ -265,6 +275,44 @@ export function AIPredictions({
             })}
           </div>
 
+          {/* GDP nowcast row */}
+          {(() => {
+            if (gdpCurrent == null && gdpPredicted == null) return (
+              <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg border border-gray-200">
+                <p className="font-medium text-gray-900">GDP Growth</p>
+                <span className="text-sm text-gray-400">No prediction available</span>
+              </div>
+            );
+            const current   = gdpCurrent   ?? 0;
+            const predicted = gdpPredicted ?? 0;
+            const change    = predicted - current;
+            const pctChange = current !== 0 ? ((change / Math.abs(current)) * 100).toFixed(1) : "—";
+            const isGood    = change > 0;
+            return (
+              <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg border border-gray-200">
+                <div className="flex-1">
+                  <p className="font-medium text-gray-900 mb-1">GDP Growth</p>
+                  <p className="text-sm text-gray-600">
+                    Current:{" "}
+                    <span className="font-semibold">{current.toFixed(2)}%</span>
+                    {" → "}
+                    Predicted:{" "}
+                    <span className="font-semibold">{predicted.toFixed(2)}%</span>
+                  </p>
+                </div>
+                <div className="text-right">
+                  <div className={`flex items-center gap-1 ${isGood ? "text-green-600" : "text-red-600"}`}>
+                    {change < 0 ? <TrendingDown className="size-4" /> : <TrendingUp className="size-4" />}
+                    <span className="font-semibold text-sm">
+                      {change > 0 ? "+" : ""}{pctChange}%
+                    </span>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-1">{gdpQuarter ?? "Next quarter"}</p>
+                </div>
+              </div>
+            );
+          })()}
+
           {/* Forecast horizon summary table */}
           {hasHorizonData && (
             <div className="mt-6">
@@ -284,8 +332,11 @@ export function AIPredictions({
                       <th className="text-center px-3 py-2 font-semibold text-gray-700 border-r border-gray-200">
                         Unemployment
                       </th>
-                      <th className="text-center px-3 py-2 font-semibold text-gray-700">
+                      <th className="text-center px-3 py-2 font-semibold text-gray-700 border-r border-gray-200">
                         Inflation
+                      </th>
+                      <th className="text-center px-3 py-2 font-semibold text-gray-700">
+                        GDP Growth
                       </th>
                     </tr>
                   </thead>
@@ -306,8 +357,11 @@ export function AIPredictions({
                           <td className="px-3 py-2 text-center font-semibold text-red-600 border-r border-gray-200">
                             {point ? `${point.predicted_unemployment.toFixed(2)}%` : "—"}
                           </td>
-                          <td className="px-3 py-2 text-center font-semibold text-amber-600">
+                          <td className="px-3 py-2 text-center font-semibold text-amber-600 border-r border-gray-200">
                             {point ? `${point.predicted_inflation.toFixed(2)}%` : "—"}
+                          </td>
+                          <td className="px-3 py-2 text-center font-semibold text-emerald-600">
+                            {point?.predicted_gdp != null ? `${point.predicted_gdp.toFixed(2)}%` : "—"}
                           </td>
                         </tr>
                       );
@@ -400,16 +454,21 @@ export function AIPredictions({
                       </p>
                     )}
 
-                  {lookupResult.type === "historical" && (
-                    <div className="flex items-center justify-between text-sm">
-                      <span className="text-gray-600">GDP Growth</span>
-                      <span className="font-semibold text-gray-900">
-                        {lookupResult.gdpGrowth != null
-                          ? `${lookupResult.gdpGrowth.toFixed(2)}%`
-                          : "—"}
-                      </span>
-                    </div>
-                  )}
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-gray-600">GDP Growth</span>
+                    <span className="font-semibold text-gray-900">
+                      {lookupResult.gdpGrowth != null
+                        ? `${lookupResult.gdpGrowth.toFixed(2)}%`
+                        : "—"}
+                    </span>
+                  </div>
+                  {lookupResult.type === "forecast" &&
+                    lookupResult.gdp_lower != null &&
+                    lookupResult.gdp_upper != null && (
+                      <p className="text-xs text-gray-400">
+                        Range: {lookupResult.gdp_lower.toFixed(2)}% – {lookupResult.gdp_upper.toFixed(2)}%
+                      </p>
+                    )}
                 </div>
 
                 {lookupResult.type === "forecast" && (
@@ -426,7 +485,7 @@ export function AIPredictions({
       {/* ── About the Models ── */}
       <div className="mt-6 border-t border-gray-100 pt-5">
         <h4 className="text-sm font-semibold text-gray-700 mb-3">About the Models</h4>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
 
           {/* XGBoost card */}
           <div className="p-4 bg-white border border-gray-200 rounded-lg">
@@ -463,6 +522,25 @@ export function AIPredictions({
             </p>
             <p className="text-xs text-gray-500 font-medium">
               Used for: Unemployment &amp; Inflation multi-step forecast with confidence intervals
+            </p>
+          </div>
+
+          {/* GDP Prophet card */}
+          <div className="p-4 bg-white border border-gray-200 rounded-lg">
+            <div className="flex flex-wrap items-center gap-2 mb-2">
+              <span className="font-semibold text-gray-900 text-sm">Prophet GDP Forecast</span>
+              <Badge variant="secondary" className="bg-emerald-100 text-emerald-700 border-emerald-200 text-xs">
+                Quarterly projections
+              </Badge>
+            </div>
+            <p className="text-xs text-gray-600 leading-relaxed mb-2">
+              A separate Prophet model trained on FRED quarterly Real GDP (SAAR % change, series
+              A191RL1Q225SBEA). It uses an additive quarterly seasonality component and a
+              changepoint prior to capture structural breaks. An XGBoost model provides the
+              current-quarter nowcast using lagged macro features.
+            </p>
+            <p className="text-xs text-gray-500 font-medium">
+              Used for: GDP Growth quarterly forecast and current-quarter nowcast
             </p>
           </div>
 

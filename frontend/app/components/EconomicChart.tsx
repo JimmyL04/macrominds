@@ -43,11 +43,14 @@ interface ChartRow {
   gdpGrowth?: number | null;
   unemployment_pred?: number | null;
   inflation_pred?: number | null;
+  gdp_pred?: number | null;
   // stacked-area CI bands (forecast zone only — null in historical rows)
   unemployment_ci_lower?: number | null;
   unemployment_ci_band?:  number | null;  // upper - lower
   inflation_ci_lower?:    number | null;
   inflation_ci_band?:     number | null;  // upper - lower
+  gdp_ci_lower?:          number | null;
+  gdp_ci_band?:           number | null;  // upper - lower
   isForecast?: boolean;
 }
 
@@ -55,12 +58,14 @@ interface ChartRow {
 const BAND_KEYS = new Set([
   "unemployment_ci_lower", "unemployment_ci_band",
   "inflation_ci_lower",    "inflation_ci_band",
+  "gdp_ci_lower",          "gdp_ci_band",
 ]);
 
 // Config for the CI legend entries injected manually
 const CI_META: Record<string, { label: string; fill: string }> = {
   unemployment: { label: "Unemployment Confidence Interval", fill: "rgba(239,68,68,0.30)" },
   inflation:    { label: "Inflation Confidence Interval",    fill: "rgba(245,158,11,0.30)" },
+  gdpGrowth:    { label: "GDP Confidence Interval",          fill: "rgba(16,185,129,0.30)" },
 };
 
 export function EconomicChart({
@@ -111,11 +116,14 @@ export function EconomicChart({
         gdpGrowth:         d.gdpGrowth,
         unemployment_pred: bt?.predicted_unemployment ?? null,
         inflation_pred:    bt?.predicted_inflation    ?? null,
+        gdp_pred:          null,
         // keep band keys null so CI areas don't render in the historical zone
         unemployment_ci_lower: null,
         unemployment_ci_band:  null,
         inflation_ci_lower:    null,
         inflation_ci_band:     null,
+        gdp_ci_lower:          null,
+        gdp_ci_band:           null,
         isForecast: false,
       };
     });
@@ -130,6 +138,8 @@ export function EconomicChart({
       const unempUpper = f.predicted_unemployment_upper ?? null;
       const infLower   = f.predicted_inflation_lower   ?? null;
       const infUpper   = f.predicted_inflation_upper   ?? null;
+      const gdpLower   = f.predicted_gdp_lower         ?? null;
+      const gdpUpper   = f.predicted_gdp_upper         ?? null;
       return {
         date:              f.date,
         unemployment:      null,
@@ -137,12 +147,16 @@ export function EconomicChart({
         gdpGrowth:         null,
         unemployment_pred: f.predicted_unemployment,
         inflation_pred:    f.predicted_inflation,
+        gdp_pred:          f.predicted_gdp ?? null,
         unemployment_ci_lower: unempLower,
         unemployment_ci_band:
           unempLower != null && unempUpper != null ? unempUpper - unempLower : null,
         inflation_ci_lower: infLower,
         inflation_ci_band:
           infLower != null && infUpper != null ? infUpper - infLower : null,
+        gdp_ci_lower: gdpLower,
+        gdp_ci_band:
+          gdpLower != null && gdpUpper != null ? gdpUpper - gdpLower : null,
         isForecast: true,
       };
     });
@@ -158,6 +172,8 @@ export function EconomicChart({
         unemployment_ci_band:  first.unemployment_ci_band,
         inflation_ci_lower:    first.inflation_ci_lower,
         inflation_ci_band:     first.inflation_ci_band,
+        gdp_ci_lower:          first.gdp_ci_lower,
+        gdp_ci_band:           first.gdp_ci_band,
       };
     }
 
@@ -180,6 +196,8 @@ export function EconomicChart({
         const uu = fp.predicted_unemployment_upper ?? null;
         const il = fp.predicted_inflation_lower    ?? null;
         const iu = fp.predicted_inflation_upper    ?? null;
+        const gl = fp.predicted_gdp_lower          ?? null;
+        const gu = fp.predicted_gdp_upper          ?? null;
         const injected: ChartRow = {
           date:              fp.date,
           unemployment:      null,
@@ -187,10 +205,13 @@ export function EconomicChart({
           gdpGrowth:         null,
           unemployment_pred: fp.predicted_unemployment,
           inflation_pred:    fp.predicted_inflation,
+          gdp_pred:          fp.predicted_gdp ?? null,
           unemployment_ci_lower: ul,
           unemployment_ci_band:  ul != null && uu != null ? uu - ul : null,
           inflation_ci_lower:    il,
           inflation_ci_band:     il != null && iu != null ? iu - il : null,
+          gdp_ci_lower:          gl,
+          gdp_ci_band:           gl != null && gu != null ? gu - gl : null,
           isForecast: true,
         };
         // Insert in chronological order using the source forecastData index as key
@@ -253,6 +274,10 @@ export function EconomicChart({
             ciLower = row.inflation_ci_lower ?? null;
             ciUpper = ciLower != null && row.inflation_ci_band != null
               ? ciLower + row.inflation_ci_band : null;
+          } else if (entry.dataKey === "gdp_pred") {
+            ciLower = row.gdp_ci_lower ?? null;
+            ciUpper = ciLower != null && row.gdp_ci_band != null
+              ? ciLower + row.gdp_ci_band : null;
           }
 
           return (
@@ -392,6 +417,34 @@ export function EconomicChart({
           />
         );
       }
+      if (selectedMetrics.includes("gdpGrowth")) {
+        bandElements.push(
+          <Area
+            key="gdp_ci_base"
+            dataKey="gdp_ci_lower"
+            stackId="ci_gdp"
+            fill="transparent"
+            stroke="none"
+            legendType="none"
+            connectNulls={false}
+            dot={false}
+            activeDot={false}
+            isAnimationActive={false}
+          />,
+          <Area
+            key="gdp_ci_band"
+            dataKey="gdp_ci_band"
+            stackId="ci_gdp"
+            fill={`rgba(16,185,129,${bandFillOpacity})`}
+            stroke="none"
+            legendType="none"
+            connectNulls={false}
+            dot={false}
+            activeDot={false}
+            isAnimationActive={false}
+          />
+        );
+      }
     }
 
     selectedMetrics.forEach((metricKey) => {
@@ -469,12 +522,14 @@ export function EconomicChart({
       type:      "historical" as const,
       unemp:     h.unemployment,
       inflation: h.inflation,
+      gdp:       h.gdpGrowth,
     };
     const f = forecastData.find((f) => f.date === highlightDate);
     if (f) return {
       type:      "forecast" as const,
       unemp:     f.predicted_unemployment,
       inflation: f.predicted_inflation,
+      gdp:       f.predicted_gdp ?? null,
     };
     return null;
   })() : null;
@@ -490,6 +545,8 @@ export function EconomicChart({
       lines.push({ text: `Unemployment: ${highlightValues.unemp.toFixed(2)}%`, color: "#ef4444" });
     if (highlightValues.inflation != null)
       lines.push({ text: `Inflation: ${highlightValues.inflation.toFixed(2)}%`, color: "#d97706" });
+    if (highlightValues.gdp != null)
+      lines.push({ text: `GDP Growth: ${highlightValues.gdp.toFixed(2)}%`, color: "#10b981" });
 
     const pad     = 8;
     const lineH   = 15;
