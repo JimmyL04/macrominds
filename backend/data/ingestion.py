@@ -120,52 +120,27 @@ def fetch_bls_data() -> pd.DataFrame:
     return bls_df
 
 
-def fetch_worldbank_data() -> pd.DataFrame:
-    indicators = {
-        "GDP_Growth":   "NY.GDP.MKTP.KD.ZG",
-        "Poverty_Rate": "SI.POV.NAHC",
-    }
-
-    wb_rows: list[dict] = []
-    for name, code in indicators.items():
-        url = (
-            f"https://api.worldbank.org/v2/country/US/indicator/{code}"
-            f"?format=json&date=2000:2025&per_page=100"
-        )
-        log.info(f"  WB    {code}  ({name})")
-        try:
-            resp = requests.get(url, timeout=30)
-            resp.raise_for_status()
-            data = resp.json()
-            if len(data) == 2 and data[1]:
-                for item in data[1]:
-                    if item["value"] is not None:
-                        wb_rows.append({"Year": int(item["date"]), name: float(item["value"])})
-        except Exception as exc:
-            log.warning(f"World Bank {code} failed: {exc}")
-
-    if not wb_rows:
-        log.warning("World Bank returned no data — skipping")
+def fetch_fred_gdp_data() -> pd.DataFrame:
+    api_key = os.getenv('FRED_API_KEY')
+    if not api_key:
+        log.warning("FRED_API_KEY not set — skipping GDP data")
         return pd.DataFrame()
 
-    wb_df = (
-        pd.DataFrame(wb_rows)
-        .groupby("Year")
-        .first()
-        .reset_index()
-    )
-    wb_df["Date"] = pd.to_datetime(wb_df["Year"].astype(str) + "-01-01")
-    wb_df.set_index("Date", inplace=True)
-    wb_df.sort_index(inplace=True)
-    wb_df.drop(columns=["Year"], inplace=True)
+    fred = Fred(api_key=api_key)
+    log.info("  FRED  A191RL1Q225SBEA  (Real GDP % change, quarterly SAAR)")
 
-    # annual → monthly by forward-filling
-    wb_monthly = wb_df.resample("MS").ffill()
+    gdp_quarterly = fred.get_series('A191RL1Q225SBEA')
+
+    # quarterly dates from FRED are already quarter-start (Jan 1, Apr 1, Jul 1, Oct 1)
+    # resample to monthly and ffill so all 3 months of a quarter share the same value
+    gdp_monthly = gdp_quarterly.resample('MS').ffill()
+    gdp_df = gdp_monthly.to_frame(name='GDP_Growth')
+
     log.info(
-        f"World Bank data ready: {len(wb_monthly)} rows  "
-        f"[{wb_monthly.index[0].date()} → {wb_monthly.index[-1].date()}]"
+        f"FRED GDP data ready: {len(gdp_df)} rows  "
+        f"[{gdp_df.index[0].date()} → {gdp_df.index[-1].date()}]"
     )
-    return wb_monthly
+    return gdp_df
 
 
 def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -261,8 +236,8 @@ def run_ingestion() -> pd.DataFrame:
     log.info("--- Fetching BLS data ---")
     df_bls = fetch_bls_data()
 
-    log.info("--- Fetching World Bank data ---")
-    df_wb = fetch_worldbank_data()
+    log.info("--- Fetching FRED quarterly GDP data ---")
+    df_gdp = fetch_fred_gdp_data()
 
     log.info("--- Engineering features ---")
     df = engineer_features(df_fred)
@@ -271,10 +246,10 @@ def run_ingestion() -> pd.DataFrame:
         df = df.join(df_bls, how="left")
         log.info("Merged BLS data")
 
-    if not df_wb.empty:
-        df = df.join(df_wb[["GDP_Growth"]], how="left")
+    if not df_gdp.empty:
+        df = df.join(df_gdp[["GDP_Growth"]], how="left")
         df["GDP_Growth"] = df["GDP_Growth"].ffill()
-        log.info("Merged World Bank GDP data")
+        log.info("Merged FRED quarterly GDP data")
 
     log.info(f"Final dataset: {len(df)} rows × {len(df.columns)} columns")
 
